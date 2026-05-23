@@ -4,6 +4,16 @@
  * - Region dropdown
  */
 
+/* Theme restore — 必须最早跑，避免页面初次闪白/闪暗 */
+(function () {
+  try {
+    const saved = localStorage.getItem('anchormas:settings:theme');
+    if (saved === 'dark' || saved === 'light') {
+      document.documentElement.dataset.theme = saved;
+    }
+  } catch (_) {}
+})();
+
 (function () {
   const $$ = (s, c) => Array.from((c || document).querySelectorAll(s));
   const app = document.querySelector('.app');
@@ -116,6 +126,200 @@
   });
 
   render();
+})();
+
+/* ============================================================
+ * Settings: multi-zone clock + lang + checkboxes 持久化
+ * ============================================================ */
+(function () {
+  // ─── zone offsets relative to CN (UTC+8) ───
+  const ZONES = { cn: 0, jp: 1, kr: 1, sea: -1, us: -16 };
+  const PILL_PERSIST = {
+    'markets-checks': 'anchormas:settings:markets',
+    'dims-checks':    'anchormas:settings:dimensions',
+  };
+  const LANG_KEY  = 'anchormas:settings:lang';
+  const TIME_KEY  = 'anchormas:settings:push-time';
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function computeClock(baseHHMM) {
+    const [bh, bm] = baseHHMM.split(':').map(Number);
+    if (Number.isNaN(bh) || Number.isNaN(bm)) return null;
+    const baseMin = bh * 60 + bm;
+    const out = {};
+    for (const [zone, offHours] of Object.entries(ZONES)) {
+      let t = baseMin + offHours * 60;
+      let day = 0;
+      while (t < 0)        { t += 24 * 60; day -= 1; }
+      while (t >= 24 * 60) { t -= 24 * 60; day += 1; }
+      out[zone] = { h: Math.floor(t / 60), m: t % 60, day };
+    }
+    return out;
+  }
+  function renderClock(base) {
+    const out = computeClock(base);
+    if (!out) return;
+    for (const [zone, v] of Object.entries(out)) {
+      const el = document.querySelector(`[data-bind="clock-${zone}"]`);
+      if (!el) continue;
+      const dayTag = v.day === -1 ? '<span class="day-shift">前一日</span>'
+                  : v.day === +1 ? '<span class="day-shift">次日</span>'
+                  : '';
+      el.innerHTML = `${pad(v.h)}:${pad(v.m)} ${dayTag}`;
+    }
+  }
+
+  // —— Push time (custom 2-segment picker) ——
+  const picker = document.querySelector('[data-role="time-picker"]');
+  if (picker) {
+    const VALID_MIN = ['00', '15', '30', '45'];
+    const hourMenu = picker.querySelector('[data-segment="hour"] .time-menu');
+    const minMenu  = picker.querySelector('[data-segment="minute"] .time-menu');
+    const hourText = picker.querySelector('[data-bind="hour-text"]');
+    const minText  = picker.querySelector('[data-bind="minute-text"]');
+
+    // 生成 24 小时选项
+    if (hourMenu && !hourMenu.children.length) {
+      for (let h = 0; h < 24; h++) {
+        const li = document.createElement('li');
+        li.setAttribute('role', 'option');
+        li.dataset.value = pad(h);
+        li.textContent = pad(h);
+        hourMenu.appendChild(li);
+      }
+    }
+
+    const state = { hour: '08', minute: '00' };
+    try {
+      const saved = localStorage.getItem(TIME_KEY);
+      if (saved && /^\d{2}:\d{2}$/.test(saved)) {
+        const [h, m] = saved.split(':');
+        state.hour = h;
+        state.minute = VALID_MIN.includes(m) ? m : '00';
+      }
+    } catch (_) {}
+
+    function syncSelected() {
+      hourMenu?.querySelectorAll('li').forEach((li) => {
+        li.setAttribute('aria-selected', li.dataset.value === state.hour ? 'true' : 'false');
+      });
+      minMenu?.querySelectorAll('li').forEach((li) => {
+        li.setAttribute('aria-selected', li.dataset.value === state.minute ? 'true' : 'false');
+      });
+    }
+
+    function applyState() {
+      if (hourText) hourText.textContent = state.hour;
+      if (minText)  minText.textContent  = state.minute;
+      syncSelected();
+      renderClock(`${state.hour}:${state.minute}`);
+      try { localStorage.setItem(TIME_KEY, `${state.hour}:${state.minute}`); } catch (_) {}
+    }
+    applyState();
+
+    function closeTimeMenus() {
+      picker.querySelectorAll('.time-menu').forEach((m) => { m.hidden = true; });
+      picker.querySelectorAll('[aria-haspopup="listbox"]').forEach((t) => t.setAttribute('aria-expanded', 'false'));
+    }
+
+    document.addEventListener('click', (e) => {
+      const trig = e.target.closest('[data-role="hour-trigger"], [data-role="minute-trigger"]');
+      if (trig && picker.contains(trig)) {
+        const wrap = trig.closest('.time-seg-wrap');
+        const menu = wrap?.querySelector('.time-menu');
+        if (!menu) return;
+        const willOpen = menu.hidden;
+        closeTimeMenus();
+        if (willOpen) {
+          menu.hidden = false;
+          trig.setAttribute('aria-expanded', 'true');
+          // 滚动选中项到可见
+          const sel = menu.querySelector('li[aria-selected="true"]');
+          if (sel) sel.scrollIntoView({ block: 'nearest' });
+        }
+        e.stopPropagation();
+        return;
+      }
+      const opt = e.target.closest('.time-menu li[data-value]');
+      if (opt && picker.contains(opt)) {
+        const seg = opt.closest('.time-seg-wrap')?.dataset.segment;
+        if (seg === 'hour')   state.hour   = opt.dataset.value;
+        if (seg === 'minute') state.minute = opt.dataset.value;
+        applyState();
+        closeTimeMenus();
+        e.stopPropagation();
+        return;
+      }
+      if (!e.target.closest('[data-role="time-picker"]')) closeTimeMenus();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeTimeMenus();
+    });
+  }
+
+  // —— Generic seg-control persist helper ——
+  function bindSegControl({ role, key, attr, apply }) {
+    const group = document.querySelector(`[data-role="${role}"]`);
+    if (!group) return;
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        group.querySelectorAll('.seg-btn').forEach((b) => {
+          b.classList.toggle('is-active', b.dataset[attr] === saved);
+        });
+        if (apply) apply(saved);
+      }
+    } catch (_) {}
+    group.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      const value = btn.dataset[attr];
+      group.querySelectorAll('.seg-btn').forEach((b) => {
+        b.classList.toggle('is-active', b === btn);
+      });
+      try { localStorage.setItem(key, value); } catch (_) {}
+      if (apply) apply(value);
+    });
+  }
+
+  bindSegControl({
+    role: 'theme-toggle',
+    key:  'anchormas:settings:theme',
+    attr: 'theme',
+    apply: (v) => { document.documentElement.dataset.theme = v; },
+  });
+
+  bindSegControl({
+    role: 'lang-toggle',
+    key:  LANG_KEY,
+    attr: 'lang',
+  });
+
+  bindSegControl({
+    role: 'max-stories-toggle',
+    key:  'anchormas:settings:max-stories',
+    attr: 'value',
+  });
+
+  // —— Check pills persistence (markets + dimensions) ——
+  for (const [role, key] of Object.entries(PILL_PERSIST)) {
+    const group = document.querySelector(`[data-role="${role}"]`);
+    if (!group) continue;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const selected = JSON.parse(raw);
+        group.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+          cb.checked = selected.includes(cb.value);
+        });
+      }
+    } catch (_) {}
+    group.addEventListener('change', () => {
+      const selected = Array.from(group.querySelectorAll('input:checked')).map((c) => c.value);
+      try { localStorage.setItem(key, JSON.stringify(selected)); } catch (_) {}
+    });
+  }
 })();
 
 /* ============================================================

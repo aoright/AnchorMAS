@@ -417,7 +417,175 @@
         </div>
       </section>
       <section class="view" data-view="saved"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 追踪</span><span class="ph-rule"></span></div></section>
-      <section class="view" data-view="settings"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 设置</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="settings">
+        <article class="settings">
+
+          <header class="settings-head">
+            <h1 class="settings-title">
+              <span class="settings-title-en">Settings</span>
+              <span class="settings-title-cn">设置</span>
+            </h1>
+          </header>
+
+          <!-- Account -->
+          <section class="settings-section">
+            <h2 class="settings-section-label">Account · 账户</h2>
+            <div class="settings-card">
+              <div class="settings-account">
+                <span class="avatar settings-avatar" aria-hidden="true">
+                  <span class="avatar-initials">JY</span>
+                  <span class="avatar-dot"></span>
+                </span>
+                <div class="settings-account-info">
+                  <span class="settings-account-name">Jie Ye</span>
+                  <span class="settings-account-role">Cross-border Ops · 跨境运营</span>
+                </div>
+              </div>
+              <button class="settings-row settings-row-action" type="button">
+                <span class="settings-row-label">退出登录 Sign out</span>
+                <span class="settings-row-chev">›</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- Brief -->
+          <section class="settings-section">
+            <h2 class="settings-section-label">Brief · 简报</h2>
+            <div class="settings-card">
+
+              <!-- Theme -->
+              <div class="settings-row">
+                <span class="settings-row-label">主题 Theme</span>
+                <div class="seg-control" data-role="theme-toggle">
+                  <button class="seg-btn is-active" type="button" data-theme="light">亮</button>
+                  <button class="seg-btn" type="button" data-theme="dark">暗</button>
+                </div>
+              </div>
+
+              <!-- Language -->
+              <div class="settings-row">
+                <span class="settings-row-label">语言 Language</span>
+                <div class="seg-control" data-role="lang-toggle">
+                  <button class="seg-btn is-active" type="button" data-lang="zh">中文</button>
+                  <button class="seg-btn" type="button" data-lang="en">English</button>
+                </div>
+              </div>
+
+              <!-- Max stories -->
+              <div class="settings-row">
+                <span class="settings-row-label">最大新闻数 Max stories</span>
+                <div class="seg-control" data-role="max-stories-toggle">
+                  <button class="seg-btn" type="button" data-value="5">5</button>
+                  <button class="seg-btn is-active" type="button" data-value="10">10</button>
+                  <button class="seg-btn" type="button" data-value="15">15</button>
+                  <button class="seg-btn" type="button" data-value="20">20</button>
+                </div>
+              </div>
+
+              <!-- Push time -->
+              <div class="settings-row settings-row-block">
+                <div class="settings-row-main">
+                  <span class="settings-row-label">推送时间 Push time</span>
+                  <div class="settings-time-input">
+                    <div class="time-picker" data-role="time-picker">
+                      <div class="time-seg-wrap" data-segment="hour">
+                        <button class="time-seg" type="button" data-role="hour-trigger" aria-haspopup="listbox" aria-expanded="false">
+                          <span data-bind="hour-text">08</span>
+                          <svg class="time-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 3 3-3"/></svg>
+                        </button>
+                        <ul class="time-menu time-menu-hour" role="listbox" hidden></ul>
+                      </div>
+                      <span class="time-colon">:</span>
+                      <div class="time-seg-wrap" data-segment="minute">
+                        <button class="time-seg" type="button" data-role="minute-trigger" aria-haspopup="listbox" aria-expanded="false">
+                          <span data-bind="minute-text">00</span>
+                          <svg class="time-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 3 3-3"/></svg>
+                        </button>
+                        <ul class="time-menu time-menu-minute" role="listbox" hidden>
+                          <li role="option" data-value="00">00</li>
+                          <li role="option" data-value="15">15</li>
+                          <li role="option" data-value="30">30</li>
+                          <li role="option" data-value="45">45</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <span class="settings-row-meta">每日</span>
+                  </div>
+                </div>
+                <div class="settings-clock" data-role="push-clock" aria-label="多地区对照">
+                  <div class="clock-head">
+                    <span>按 China time 计算</span>
+                  </div>
+                  <div class="clock-row"><span class="clock-region"><span class="clock-cn">中国</span> CN</span><span class="clock-time" data-bind="clock-cn">08:00</span></div>
+                  <div class="clock-row"><span class="clock-region"><span class="clock-cn">日本</span> JP</span><span class="clock-time" data-bind="clock-jp">09:00</span></div>
+                  <div class="clock-row"><span class="clock-region"><span class="clock-cn">韩国</span> KR</span><span class="clock-time" data-bind="clock-kr">09:00</span></div>
+                  <div class="clock-row"><span class="clock-region"><span class="clock-cn">东南亚</span> ICT</span><span class="clock-time" data-bind="clock-sea">07:00</span></div>
+                  <div class="clock-row"><span class="clock-region"><span class="clock-cn">美国</span> PST</span><span class="clock-time" data-bind="clock-us">16:00 <span class="day-shift">前一日</span></span></div>
+                </div>
+              </div>
+
+              <!-- Markets -->
+              <div class="settings-row settings-row-block">
+                <span class="settings-row-label">关注市场 Markets</span>
+                <div class="settings-checks" data-role="markets-checks">
+                  <label class="check-pill"><input type="checkbox" value="cn" checked><span>中国</span></label>
+                  <label class="check-pill"><input type="checkbox" value="jp" checked><span>日本</span></label>
+                  <label class="check-pill"><input type="checkbox" value="kr" checked><span>韩国</span></label>
+                  <label class="check-pill"><input type="checkbox" value="sea" checked><span>东南亚</span></label>
+                  <label class="check-pill"><input type="checkbox" value="us" checked><span>美国</span></label>
+                </div>
+              </div>
+
+              <!-- Dimensions -->
+              <div class="settings-row settings-row-block">
+                <span class="settings-row-label">关注维度 Dimensions</span>
+                <div class="settings-checks" data-role="dims-checks">
+                  <label class="check-pill"><input type="checkbox" value="competition" checked><span>竞争</span></label>
+                  <label class="check-pill"><input type="checkbox" value="product" checked><span>产品</span></label>
+                  <label class="check-pill"><input type="checkbox" value="platform" checked><span>平台</span></label>
+                  <label class="check-pill"><input type="checkbox" value="social" checked><span>社媒</span></label>
+                  <label class="check-pill"><input type="checkbox" value="regulation" checked><span>法规</span></label>
+                </div>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- Sources -->
+          <section class="settings-section">
+            <h2 class="settings-section-label">Sources · 信源</h2>
+            <div class="settings-card">
+              <button class="settings-row settings-row-action" type="button">
+                <div class="settings-row-main settings-row-stack">
+                  <span class="settings-row-label">激活信源 Active sources</span>
+                  <span class="settings-row-meta">11 unique · 5 regions · 4 languages</span>
+                </div>
+                <span class="settings-row-chev">›</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- About -->
+          <section class="settings-section">
+            <h2 class="settings-section-label">About · 关于</h2>
+            <div class="settings-card">
+              <div class="settings-row">
+                <span class="settings-row-label">版本 Version</span>
+                <span class="settings-row-meta">v 0.1.0 · build 0523</span>
+              </div>
+              <div class="settings-row">
+                <span class="settings-row-label">Agent 模型 Model</span>
+                <span class="settings-row-meta">Claude Opus 4.7</span>
+              </div>
+              <div class="settings-row">
+                <span class="settings-row-label">上次生成 Last run</span>
+                <span class="settings-row-meta">23 May · 08:30 +08:00</span>
+              </div>
+            </div>
+          </section>
+
+        </article>
+      </section>
 
     </main>
 
@@ -426,7 +594,7 @@
       <span class="tabbar-bg" aria-hidden="true">
         <svg viewBox="0 0 800 100" preserveAspectRatio="none">
           <path d="M 0 100 L 0 22 L 320 22 C 348 22 358 2 400 2 C 442 2 452 22 480 22 L 800 22 L 800 100 Z"
-                fill="#f4efe5" stroke="rgba(26,24,20,0.14)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+                stroke-width="1" vector-effect="non-scaling-stroke"/>
         </svg>
       </span>
 
