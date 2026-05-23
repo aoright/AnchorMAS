@@ -115,19 +115,103 @@
 })();
 
 /* ============================================================
- * Story more-toggle (折叠 sources/收藏/追问)
+ * Track confirm flow (同手机端，桌面 dialog 略宽)
  * ============================================================ */
 (function () {
+  const STORAGE_KEY = 'anchormas:tracked';
+  const dialog = document.querySelector('[data-role="track-dialog"]');
+  if (!dialog) return;
+
+  let pending = null;
+  let closingTimer = null;
+
+  function tracked() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (_) { return []; }
+  }
+  function persist(list) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch (_) {}
+  }
+  function findTrackBtn(storyEl) {
+    return Array.from(storyEl.querySelectorAll('.story-action')).find((b) => {
+      const t = b.querySelector('span')?.textContent.trim();
+      return t === '追踪' || t === '已追踪';
+    });
+  }
+  function setStoryTracked(storyEl, on) {
+    if (on) storyEl.dataset.tracked = 'true';
+    else delete storyEl.dataset.tracked;
+    const btn = findTrackBtn(storyEl);
+    if (btn) {
+      const span = btn.querySelector('span');
+      if (span) span.textContent = on ? '已追踪' : '追踪';
+      btn.classList.toggle('is-tracked', on);
+    }
+  }
+  function storyKey(storyEl) {
+    return storyEl.querySelector('.story-headline')?.textContent.trim() || '';
+  }
+
+  function restore() {
+    const list = tracked();
+    document.querySelectorAll('.story').forEach((s) => {
+      if (list.includes(storyKey(s))) setStoryTracked(s, true);
+    });
+  }
+  restore();
+
+  function openDialog(storyEl) {
+    pending = storyEl;
+    const headline = storyKey(storyEl) || '—';
+    dialog.querySelector('[data-bind="track-headline"]').textContent = headline;
+    delete dialog.dataset.state;
+    dialog.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+  function closeDialog() {
+    if (dialog.hidden) return;
+    if (closingTimer) clearTimeout(closingTimer);
+    dialog.dataset.state = 'closing';
+    closingTimer = setTimeout(() => {
+      dialog.hidden = true;
+      delete dialog.dataset.state;
+      document.body.style.overflow = '';
+      pending = null;
+      closingTimer = null;
+    }, 180);
+  }
+  function confirmTrack() {
+    if (!pending) { closeDialog(); return; }
+    setStoryTracked(pending, true);
+    const list = tracked();
+    const key = storyKey(pending);
+    if (key && !list.includes(key)) { list.push(key); persist(list); }
+    closeDialog();
+  }
+
   document.addEventListener('click', (e) => {
-    const trig = e.target.closest('.story-more');
-    if (!trig) return;
-    const story = trig.closest('.story');
+    if (e.target.closest('[data-role="track-cancel"]')) { closeDialog(); return; }
+    if (e.target.closest('[data-role="track-confirm"]')) { confirmTrack(); return; }
+
+    const btn = e.target.closest('.story-action');
+    if (!btn) return;
+    const label = btn.querySelector('span')?.textContent.trim();
+    if (label !== '追踪' && label !== '已追踪') return;
+
+    const story = btn.closest('.story');
     if (!story) return;
-    const foot = story.querySelector('.story-foot');
-    if (!foot) return;
-    const willOpen = foot.hidden;
-    foot.hidden = !willOpen;
-    trig.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    e.preventDefault();
+    e.stopPropagation();
+    if (label === '追踪') {
+      openDialog(story);
+    } else {
+      setStoryTracked(story, false);
+      const key = storyKey(story);
+      persist(tracked().filter((k) => k !== key));
+    }
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !dialog.hidden) closeDialog();
   });
 })();
 

@@ -1,0 +1,175 @@
+{
+  "date": "2026-05-23",
+  "edition": 42,
+  "generated_at": "2026-05-23T08:30:00+08:00",
+
+  "lead": {
+    "summary_en": "Five overseas markets registered material movement today.",
+    "summary_cn": "三起平台 / 法规变动正在重塑跨境运营节奏。",
+    "highlight":  "中国、东南亚需立即关注"
+  },
+
+  "stories": [
+    {
+      "id":     "2026-05-23-cn-01",
+      "rank":   1,
+      "region": "cn",
+      "market": { "cn": "中国", "en": "China" },
+
+      "impact": { "category": "risk", "severity": 4, "urgency": 4 },
+      "tags":   ["regulation", "platform"],
+
+      "headline": "中国海关跨境电商出口 HS 编码申报抽查规则 6 月起升级",
+      "outlook":  "出口东南亚、中东海外仓的中小品牌可能面临 3–5 日清关延迟。",
+      "action":   "复核 SKU 在新规下的归类正确性 ＋ 报关代理资质审查。",
+
+      "sources": [
+        {
+          "id":   "src-haiguan-20260523-0812",
+          "name": "海关总署",
+          "url":  "https://www.customs.gov.cn/customs/302249/2480148/index.html",
+          "time": "08:12",
+          "lang": "zh"
+        },
+        {
+          "id":   "src-cifnews-20260523-0630",
+          "name": "雨果跨境",
+          "url":  "https://www.cifnews.com/article/customs-hs-code-2026",
+          "time": "06:30",
+          "lang": "zh"
+        }
+      ]
+    },
+
+    {
+      "id":     "2026-05-23-jp-01",
+      "rank":   2,
+      "region": "jp",
+      "market": { "cn": "日本", "en": "Japan" },
+
+      "impact": { "category": "attention", "severity": 2, "urgency": 2 },
+      "tags":   ["regulation", "product"],
+
+      "headline": "日本消費者庁就 EC 标价表示规范发布修订意见征集",
+      "outlook":  "影响\"原价划线 + 折扣\"营销表达，6 月底前可提交意见。",
+      "action":   "检视乐天 / 雅虎 listing 表达，评估 PR 介入必要性。",
+
+      "sources": [
+        {
+          "id":   "src-caa-20260523-0800",
+          "name": "消費者庁",
+          "url":  "https://www.caa.go.jp/policies/policy/representation/...",
+          "time": "08:00",
+          "lang": "ja"
+        },
+        {
+          "id":   "src-nikkei-20260523-0730",
+          "name": "日経新聞",
+          "url":  "https://www.nikkei.com/article/DGXZQOUC...",
+          "time": "07:30",
+          "lang": "ja"
+        }
+      ]
+    },
+
+    {
+      "id":     "2026-05-23-kr-01",
+      "rank":   3,
+      "region": "kr",
+      "market": { "cn": "韩国", "en": "Korea" },
+
+      "impact": { "category": "opportunity", "severity": 3, "urgency": 3 },
+      "tags":   ["platform"],
+
+      "headline": "Olive Young 与 7-Eleven 韩国合作扩张，覆盖 6,000＋ 门店",
+      "outlook":  "韩国本地线下渠道开放新流量入口，K-Beauty 同品类有进入窗口。",
+      "action":   "评估韩国仓 SKU 与 OY × 7-Eleven 联合促销可能性。",
+
+      "sources": [
+        {
+          "id":   "src-mk-20260523-0715",
+          "name": "매일경제",
+          "url":  "https://www.mk.co.kr/news/business/...",
+          "time": "07:15",
+          "lang": "ko"
+        },
+        {
+          "id":   "src-oy-20260523-0600",
+          "name": "Olive Young 公告",
+          "url":  "https://www.oliveyoung.co.kr/store/notice/...",
+          "time": "06:00",
+          "lang": "ko"
+        }
+      ]
+    },
+
+    {
+      "id":     "2026-05-23-sea-01",
+      "rank":   4,
+      "region": "sea",
+      "market": { "cn": "东南亚", "en": "Southeast Asia", "country_focus": "VN" },
+
+      "impact": { "category": "risk", "severity": 5, "urgency": 4 },
+      "tags":   ["platform", "regulation"],
+
+      "headline": "TikTok Shop 越南站抽佣由 5% 上调至 8%，6 月起执行",
+      "outlook":  "直接挤压本地化定价空间，中小 SKU 毛利首当其冲。",
+      "action":   "复核越南 SKU 定价模型 ＋ 库存批次上架节奏。",
+
+      "sources": [
+        {
+          "id":   "src-reuters-20260523-0342",
+          "name": "Reuters",
+          "url":  "https://www.reuters.com/technology/tiktok-shop-vietnam-commission-2026-05-23/",
+          "time": "03:42",
+          "lang": "en"
+        },
+        {
+          "id":   "src-vnexpress-20260523-0218",
+          "name": "VnExpress",
+          "url":  "https://e.vnexpress.net/news/business/...",
+          "time": "02:18",
+          "lang": "vi"
+        },
+        {
+          "id":   "src-tt-announcement-20260523-0100",
+          "name": "平台公告",
+          "url":  "https://seller-vn.tiktokshop.com/announcement/...",
+          "time": "01:00",
+          "lang": "vi"
+        }
+      ]
+    },
+
+    {
+      "id":     "2026-05-23-us-01",
+      "rank":   5,
+      "region": "us",
+      "market": { "cn": "美国", "en": "United States" },
+
+      "impact": { "category": "opportunity", "severity": 3, "urgency": 2 },
+      "tags":   ["product", "competition", "social"],
+
+      "headline": "Stanley 新色系反响平淡，社媒声量同比下滑 18%",
+      "outlook":  "该品类终端流量出现空档，适合错位上架限定色或胶囊系列。",
+      "action":   "评估美国仓 Q3 限定 SKU 节奏，准备 TikTok / Reels 种草排期。",
+
+      "sources": [
+        {
+          "id":   "src-brandwatch-20260523-0700",
+          "name": "Brandwatch",
+          "url":  "https://www.brandwatch.com/reports/drinkware-may-2026/",
+          "time": "07:00",
+          "lang": "en"
+        },
+        {
+          "id":   "src-tiktok-trends-20260523-0545",
+          "name": "TikTok Trends",
+          "url":  "https://www.tiktok.com/business/en/blog/trending-may-2026",
+          "time": "05:45",
+          "lang": "en"
+        }
+      ]
+    }
+  ]
+}
