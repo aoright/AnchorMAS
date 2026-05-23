@@ -117,3 +117,159 @@
 
   render();
 })();
+
+/* ============================================================
+ * Story more-toggle (折叠 sources/收藏/追问)
+ * - 点击 .story-more 切换
+ * - 长按 .story 本体 450ms 也切换
+ * ============================================================ */
+(function () {
+  function toggleFoot(story, force) {
+    const foot = story.querySelector('.story-foot');
+    const btn  = story.querySelector('.story-more');
+    if (!foot) return;
+    const willOpen = typeof force === 'boolean' ? force : foot.hidden;
+    foot.hidden = !willOpen;
+    if (btn) btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  }
+
+  document.addEventListener('click', (e) => {
+    const trig = e.target.closest('.story-more');
+    if (trig) {
+      const story = trig.closest('.story');
+      if (story) toggleFoot(story);
+    }
+  });
+
+  // 长按检测
+  let pressTimer = null;
+  let pressedStory = null;
+  document.addEventListener('touchstart', (e) => {
+    const story = e.target.closest('.story');
+    if (!story) return;
+    if (e.target.closest('a, button')) return;     // 避免和 link/button 冲突
+    pressedStory = story;
+    pressTimer = setTimeout(() => {
+      if (pressedStory) toggleFoot(pressedStory);
+      pressTimer = null;
+    }, 450);
+  }, { passive: true });
+  ['touchend', 'touchcancel', 'touchmove'].forEach((ev) => {
+    document.addEventListener(ev, () => {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      pressedStory = null;
+    }, { passive: true });
+  });
+})();
+
+/* ============================================================
+ * News feed: enrich time display with relative "Xh ago"
+ *   (假设"现在"是 12:30 PM；真实场景里用 Date.now() 算)
+ * ============================================================ */
+(function () {
+  const NOW_MIN = 12 * 60 + 30;
+  function relAgo(timeStr) {
+    const m = /^(\d{1,2}):(\d{2})/.exec(timeStr.trim());
+    if (!m) return '';
+    const itemMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const diff = NOW_MIN - itemMin;
+    if (diff < 1) return 'just now';
+    if (diff < 60) return `${diff}m ago`;
+    return `${Math.round(diff / 60)}h ago`;
+  }
+  document.querySelectorAll('.news-time').forEach((t) => {
+    if (t.nextElementSibling && t.nextElementSibling.classList.contains('news-rel')) return;
+    const rel = relAgo(t.textContent);
+    if (!rel) return;
+    const span = document.createElement('span');
+    span.className = 'news-rel';
+    span.textContent = rel;
+    t.after(span);
+  });
+})();
+
+/* ============================================================
+ * News feed: region filter + item click → source viewer
+ * ============================================================ */
+(function () {
+  const view = document.querySelector('.news-view');
+  if (!view) return;
+
+  document.addEventListener('click', (e) => {
+    const pill = e.target.closest('.news-pill');
+    if (!pill) return;
+    const region = pill.dataset.region;
+    view.setAttribute('data-active-region', region);
+    document.querySelectorAll('.news-pill').forEach((p) => {
+      p.classList.toggle('is-active', p === pill);
+    });
+  });
+})();
+
+/* ============================================================
+ * Source viewer (bottom sheet)
+ * - 从 story-sources 链接打开（简报页）
+ * - 从 news-item 整条打开（新闻页）
+ * ============================================================ */
+(function () {
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+  const viewer = document.querySelector('[data-role="source-sheet"]');
+  if (!viewer) return;
+
+  function populate({ name, time, title }) {
+    $$('[data-bind="source-name"]').forEach((el) => { el.textContent = name; });
+    $$('[data-bind="source-time"]').forEach((el) => {
+      el.textContent = time ? `${time} · 23 May 2026` : '23 May 2026';
+    });
+    $$('[data-bind="source-title"]').forEach((el) => { el.textContent = title; });
+  }
+  function show() {
+    delete viewer.dataset.state;
+    viewer.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+  let closingTimer = null;
+  function close() {
+    if (viewer.hidden) return;
+    if (closingTimer) clearTimeout(closingTimer);
+    viewer.dataset.state = 'closing';
+    closingTimer = setTimeout(() => {
+      viewer.hidden = true;
+      delete viewer.dataset.state;
+      document.body.style.overflow = '';
+      closingTimer = null;
+    }, 280);
+  }
+
+  function openFromStoryLink(linkEl) {
+    const story = linkEl.closest('.story');
+    populate({
+      title: story?.querySelector('.story-headline')?.textContent.trim() || '',
+      name: linkEl.querySelector('.src-name')?.textContent.trim() || 'Source',
+      time: linkEl.querySelector('time')?.textContent.trim() || '',
+    });
+    show();
+  }
+  function openFromNewsItem(itemEl) {
+    populate({
+      title: itemEl.querySelector('.news-headline')?.textContent.trim() || '',
+      name: itemEl.querySelector('.news-source')?.textContent.trim() || 'Source',
+      time: itemEl.querySelector('.news-time')?.textContent.trim() || '',
+    });
+    show();
+  }
+
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('.story-sources a');
+    if (link) { e.preventDefault(); openFromStoryLink(link); return; }
+
+    const newsItem = e.target.closest('.news-item');
+    if (newsItem) { openFromNewsItem(newsItem); return; }
+
+    if (e.target.closest('[data-role="source-close"]')) { close(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !viewer.hidden) close();
+  });
+})();

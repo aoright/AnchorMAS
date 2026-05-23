@@ -65,7 +65,7 @@
             <input class="date-native" type="date" value="2026-05-23" data-bind="date-input" tabindex="-1" aria-hidden="true">
           </button>
 
-          <div class="region-picker">
+          <div class="region-picker" data-scope="brief">
             <button class="control-btn" type="button" data-role="region-trigger" aria-haspopup="listbox" aria-expanded="false">
               <span class="control-label">Region</span>
               <span class="control-row">
@@ -97,6 +97,26 @@
           <span class="nav-text"><span class="nav-label">新闻</span><span class="nav-en">News</span></span>
           <span class="nav-marker"></span>
         </button>
+
+        <div class="nav-controls" data-controls="market">
+          <div class="region-picker" data-scope="news">
+            <button class="control-btn" type="button" data-role="news-region-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span class="control-label">Region</span>
+              <span class="control-row">
+                <span class="control-value" data-bind="news-region-text">全部市场</span>
+                <svg class="control-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 3 3-3"/></svg>
+              </span>
+            </button>
+            <ul class="region-menu" role="listbox" hidden>
+              <li role="option" data-region="all"><span class="opt-cn">全部市场</span><span class="opt-en">All</span></li>
+              <li role="option" data-region="cn"><span class="opt-cn">中国</span><span class="opt-en">CN</span></li>
+              <li role="option" data-region="jp"><span class="opt-cn">日本</span><span class="opt-en">JP</span></li>
+              <li role="option" data-region="kr"><span class="opt-cn">韩国</span><span class="opt-en">KR</span></li>
+              <li role="option" data-region="sea"><span class="opt-cn">东南亚</span><span class="opt-en">SEA</span></li>
+              <li role="option" data-region="us"><span class="opt-cn">美国</span><span class="opt-en">US</span></li>
+            </ul>
+          </div>
+        </div>
 
         <button class="nav-item" data-tab="saved">
           <span class="nav-num">04</span>
@@ -146,14 +166,6 @@
               Five overseas markets registered material movement today.
               <em>中国、东南亚需立即关注</em>，三起平台 / 法规变动正在重塑跨境运营节奏。
             </p>
-
-            <div class="climate-strip" aria-label="今日市场温度">
-              <span class="climate-chip" data-level="high"><span class="dot"></span><span class="chip-cn">中国</span><span class="chip-en">CN</span></span>
-              <span class="climate-chip" data-level="watch"><span class="dot"></span><span class="chip-cn">日本</span><span class="chip-en">JP</span></span>
-              <span class="climate-chip" data-level="ok"><span class="dot"></span><span class="chip-cn">韩国</span><span class="chip-en">KR</span></span>
-              <span class="climate-chip" data-level="high"><span class="dot"></span><span class="chip-cn">东南亚</span><span class="chip-en">SEA</span></span>
-              <span class="climate-chip" data-level="ok"><span class="dot"></span><span class="chip-cn">美国</span><span class="chip-en">US</span></span>
-            </div>
           </header>
 
           <div class="brief-orn" aria-hidden="true">
@@ -166,16 +178,24 @@
               <div class="story-num">01</div>
               <div class="story-main">
                 <div class="story-top">
-                  <h2 class="story-market"><span class="market-cn">中国</span><span class="market-en">China · CN</span></h2>
-                  <span class="story-badge">High Risk</span>
+                  <h2 class="story-market"><span class="market-cn">中国</span></h2>
+                  <div class="story-metrics">
+                    <span class="story-badge">Risk</span>
+                    <span class="metric"><span class="metric-label">Sev</span><span class="metric-chip" data-value="4">4</span></span>
+                    <span class="metric"><span class="metric-label">Urg</span><span class="metric-chip" data-value="4">4</span></span>
+                  </div>
                 </div>
-                <div class="story-tags"><span class="tag">Regulation</span><span class="tag">Platform</span></div>
                 <h3 class="story-headline">中国海关跨境电商出口 HS 编码申报抽查规则 6 月起升级</h3>
                 <dl class="story-detail">
-                  <div class="detail-row"><dt>Impact</dt><dd>出口东南亚、中东海外仓的中小品牌可能面临 3–5 日清关延迟。</dd></div>
+                  <div class="detail-row"><dt>Outlook</dt><dd>出口东南亚、中东海外仓的中小品牌可能面临 3–5 日清关延迟。</dd></div>
                   <div class="detail-row"><dt>Action</dt><dd>复核 SKU 在新规下的归类正确性 ＋ 报关代理资质审查。</dd></div>
                 </dl>
-                <footer class="story-foot">
+                <button class="story-more" type="button" aria-expanded="false" aria-label="展开来源与操作">
+                  <span class="more-rule"></span>
+                  <span class="more-glyph">⋯</span>
+                  <span class="more-rule"></span>
+                </button>
+                <footer class="story-foot" hidden>
                   <ol class="story-sources">
                     <li><a href="#"><span class="src-num">1</span><span class="src-name">海关总署</span><time>08:12</time></a></li>
                     <li><a href="#"><span class="src-num">2</span><span class="src-name">雨果跨境</span><time>06:30</time></a></li>
@@ -192,16 +212,24 @@
               <div class="story-num">02</div>
               <div class="story-main">
                 <div class="story-top">
-                  <h2 class="story-market"><span class="market-cn">日本</span><span class="market-en">Japan · JP</span></h2>
-                  <span class="story-badge">Watch</span>
+                  <h2 class="story-market"><span class="market-cn">日本</span></h2>
+                  <div class="story-metrics">
+                    <span class="story-badge">Attention</span>
+                    <span class="metric"><span class="metric-label">Sev</span><span class="metric-chip" data-value="2">2</span></span>
+                    <span class="metric"><span class="metric-label">Urg</span><span class="metric-chip" data-value="2">2</span></span>
+                  </div>
                 </div>
-                <div class="story-tags"><span class="tag">Regulation</span><span class="tag">Product</span></div>
                 <h3 class="story-headline">日本消費者庁就 EC 标价表示规范发布修订意见征集</h3>
                 <dl class="story-detail">
-                  <div class="detail-row"><dt>Impact</dt><dd>影响"原价划线 + 折扣"营销表达，6 月底前可提交意见。</dd></div>
+                  <div class="detail-row"><dt>Outlook</dt><dd>影响"原价划线 + 折扣"营销表达，6 月底前可提交意见。</dd></div>
                   <div class="detail-row"><dt>Action</dt><dd>检视乐天 / 雅虎 listing 表达，评估 PR 介入必要性。</dd></div>
                 </dl>
-                <footer class="story-foot">
+                <button class="story-more" type="button" aria-expanded="false" aria-label="展开来源与操作">
+                  <span class="more-rule"></span>
+                  <span class="more-glyph">⋯</span>
+                  <span class="more-rule"></span>
+                </button>
+                <footer class="story-foot" hidden>
                   <ol class="story-sources">
                     <li><a href="#"><span class="src-num">1</span><span class="src-name">消費者庁</span><time>08:00</time></a></li>
                     <li><a href="#"><span class="src-num">2</span><span class="src-name">日経新聞</span><time>07:30</time></a></li>
@@ -218,16 +246,24 @@
               <div class="story-num">03</div>
               <div class="story-main">
                 <div class="story-top">
-                  <h2 class="story-market"><span class="market-cn">韩国</span><span class="market-en">Korea · KR</span></h2>
-                  <span class="story-badge">Opportunity</span>
+                  <h2 class="story-market"><span class="market-cn">韩国</span></h2>
+                  <div class="story-metrics">
+                    <span class="story-badge">Opportunity</span>
+                    <span class="metric"><span class="metric-label">Sev</span><span class="metric-chip" data-value="3">3</span></span>
+                    <span class="metric"><span class="metric-label">Urg</span><span class="metric-chip" data-value="3">3</span></span>
+                  </div>
                 </div>
-                <div class="story-tags"><span class="tag">Platform</span><span class="tag">Distribution</span></div>
                 <h3 class="story-headline">Olive Young 与 7-Eleven 韩国合作扩张，覆盖 6,000＋ 门店</h3>
                 <dl class="story-detail">
-                  <div class="detail-row"><dt>Impact</dt><dd>韩国本地线下渠道开放新流量入口，K-Beauty 同品类有进入窗口。</dd></div>
+                  <div class="detail-row"><dt>Outlook</dt><dd>韩国本地线下渠道开放新流量入口，K-Beauty 同品类有进入窗口。</dd></div>
                   <div class="detail-row"><dt>Action</dt><dd>评估韩国仓 SKU 与 OY × 7-Eleven 联合促销可能性。</dd></div>
                 </dl>
-                <footer class="story-foot">
+                <button class="story-more" type="button" aria-expanded="false" aria-label="展开来源与操作">
+                  <span class="more-rule"></span>
+                  <span class="more-glyph">⋯</span>
+                  <span class="more-rule"></span>
+                </button>
+                <footer class="story-foot" hidden>
                   <ol class="story-sources">
                     <li><a href="#"><span class="src-num">1</span><span class="src-name">매일경제</span><time>07:15</time></a></li>
                     <li><a href="#"><span class="src-num">2</span><span class="src-name">Olive Young 公告</span><time>06:00</time></a></li>
@@ -244,16 +280,24 @@
               <div class="story-num">04</div>
               <div class="story-main">
                 <div class="story-top">
-                  <h2 class="story-market"><span class="market-cn">东南亚</span><span class="market-en">Southeast Asia · VN</span></h2>
-                  <span class="story-badge">High Risk</span>
+                  <h2 class="story-market"><span class="market-cn">东南亚</span></h2>
+                  <div class="story-metrics">
+                    <span class="story-badge">Risk</span>
+                    <span class="metric"><span class="metric-label">Sev</span><span class="metric-chip" data-value="5">5</span></span>
+                    <span class="metric"><span class="metric-label">Urg</span><span class="metric-chip" data-value="4">4</span></span>
+                  </div>
                 </div>
-                <div class="story-tags"><span class="tag">Platform</span><span class="tag">Regulation</span></div>
                 <h3 class="story-headline">TikTok Shop 越南站抽佣由 5% 上调至 8%，6 月起执行</h3>
                 <dl class="story-detail">
-                  <div class="detail-row"><dt>Impact</dt><dd>直接挤压本地化定价空间，中小 SKU 毛利首当其冲。</dd></div>
+                  <div class="detail-row"><dt>Outlook</dt><dd>直接挤压本地化定价空间，中小 SKU 毛利首当其冲。</dd></div>
                   <div class="detail-row"><dt>Action</dt><dd>复核越南 SKU 定价模型 ＋ 库存批次上架节奏。</dd></div>
                 </dl>
-                <footer class="story-foot">
+                <button class="story-more" type="button" aria-expanded="false" aria-label="展开来源与操作">
+                  <span class="more-rule"></span>
+                  <span class="more-glyph">⋯</span>
+                  <span class="more-rule"></span>
+                </button>
+                <footer class="story-foot" hidden>
                   <ol class="story-sources">
                     <li><a href="#"><span class="src-num">1</span><span class="src-name">Reuters</span><time>03:42</time></a></li>
                     <li><a href="#"><span class="src-num">2</span><span class="src-name">VnExpress</span><time>02:18</time></a></li>
@@ -271,16 +315,24 @@
               <div class="story-num">05</div>
               <div class="story-main">
                 <div class="story-top">
-                  <h2 class="story-market"><span class="market-cn">美国</span><span class="market-en">United States · US</span></h2>
-                  <span class="story-badge">Opportunity</span>
+                  <h2 class="story-market"><span class="market-cn">美国</span></h2>
+                  <div class="story-metrics">
+                    <span class="story-badge">Opportunity</span>
+                    <span class="metric"><span class="metric-label">Sev</span><span class="metric-chip" data-value="3">3</span></span>
+                    <span class="metric"><span class="metric-label">Urg</span><span class="metric-chip" data-value="2">2</span></span>
+                  </div>
                 </div>
-                <div class="story-tags"><span class="tag">Product</span><span class="tag">Competition</span></div>
                 <h3 class="story-headline">Stanley 新色系反响平淡，社媒声量同比下滑 18%</h3>
                 <dl class="story-detail">
-                  <div class="detail-row"><dt>Impact</dt><dd>该品类终端流量出现空档，适合错位上架限定色或胶囊系列。</dd></div>
+                  <div class="detail-row"><dt>Outlook</dt><dd>该品类终端流量出现空档，适合错位上架限定色或胶囊系列。</dd></div>
                   <div class="detail-row"><dt>Action</dt><dd>评估美国仓 Q3 限定 SKU 节奏，准备 TikTok / Reels 种草排期。</dd></div>
                 </dl>
-                <footer class="story-foot">
+                <button class="story-more" type="button" aria-expanded="false" aria-label="展开来源与操作">
+                  <span class="more-rule"></span>
+                  <span class="more-glyph">⋯</span>
+                  <span class="more-rule"></span>
+                </button>
+                <footer class="story-foot" hidden>
                   <ol class="story-sources">
                     <li><a href="#"><span class="src-num">1</span><span class="src-name">Brandwatch</span><time>07:00</time></a></li>
                     <li><a href="#"><span class="src-num">2</span><span class="src-name">TikTok Trends</span><time>05:45</time></a></li>
@@ -305,12 +357,194 @@
       </section>
 
       <section class="view" data-view="chat"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 对话</span><span class="ph-rule"></span></div></section>
-      <section class="view" data-view="market"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 新闻</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="market">
+        <div class="news-view" data-active-region="all">
+
+          <header class="news-head">
+            <div class="news-title-row">
+              <h1 class="news-title">
+                <span class="news-title-en">News Feed</span>
+                <span class="news-title-cn">新闻流</span>
+              </h1>
+            </div>
+            <nav class="news-filters" aria-label="按地区筛选">
+              <button class="news-pill is-active" data-region="all">All</button>
+              <button class="news-pill" data-region="cn">中国</button>
+              <button class="news-pill" data-region="jp">日本</button>
+              <button class="news-pill" data-region="kr">韩国</button>
+              <button class="news-pill" data-region="sea">东南亚</button>
+              <button class="news-pill" data-region="us">美国</button>
+            </nav>
+          </header>
+
+          <div class="news-list">
+
+            <article class="news-item" data-region="cn">
+              <div class="news-meta">
+                <time class="news-time">08:12</time>
+                <span class="news-source">海关总署</span>
+                <span class="news-region">CN</span>
+              </div>
+              <h3 class="news-headline">中国海关跨境电商出口 HS 编码申报抽查规则 6 月起升级</h3>
+              <p class="news-snippet">出口东南亚、中东海外仓的中小品牌可能面临 3–5 日清关延迟。海关总署表示，新规对中小品牌的执行难度更高。</p>
+            </article>
+
+            <article class="news-item" data-region="jp">
+              <div class="news-meta">
+                <time class="news-time">08:00</time>
+                <span class="news-source">消費者庁</span>
+                <span class="news-region">JP</span>
+              </div>
+              <h3 class="news-headline">日本消費者庁就 EC 标价表示规范发布修订意见征集</h3>
+              <p class="news-snippet">影响"原价划线 + 折扣"营销表达，6 月底前可提交意见。</p>
+            </article>
+
+            <article class="news-item" data-region="jp">
+              <div class="news-meta">
+                <time class="news-time">07:30</time>
+                <span class="news-source">日経新聞</span>
+                <span class="news-region">JP</span>
+              </div>
+              <h3 class="news-headline">乐天、雅虎等主要 EC 平台已对接消费者厅新规</h3>
+              <p class="news-snippet">部分品牌已开始检视 listing 表达，预计 PR 公关动作启动。</p>
+            </article>
+
+            <article class="news-item" data-region="kr">
+              <div class="news-meta">
+                <time class="news-time">07:15</time>
+                <span class="news-source">매일경제</span>
+                <span class="news-region">KR</span>
+              </div>
+              <h3 class="news-headline">Olive Young × 7-Eleven 韩国合作官方发布</h3>
+              <p class="news-snippet">覆盖 6,000＋ 门店，K-Beauty 品类首批入驻名单将在 6 月公布。</p>
+            </article>
+
+            <article class="news-item" data-region="us">
+              <div class="news-meta">
+                <time class="news-time">07:00</time>
+                <span class="news-source">Brandwatch</span>
+                <span class="news-region">US</span>
+              </div>
+              <h3 class="news-headline">Stanley 新色系反响平淡，社媒声量同比下滑 18%</h3>
+              <p class="news-snippet">该品类终端流量出现空档，竞品有机会切入限定色或胶囊系列。</p>
+            </article>
+
+            <article class="news-item" data-region="cn">
+              <div class="news-meta">
+                <time class="news-time">06:30</time>
+                <span class="news-source">雨果跨境</span>
+                <span class="news-region">CN</span>
+              </div>
+              <h3 class="news-headline">HS 编码抽查升级，跨境卖家应如何应对</h3>
+              <p class="news-snippet">行业分析师建议复核 SKU 归类正确性，并审查报关代理资质。</p>
+            </article>
+
+            <article class="news-item" data-region="sea">
+              <div class="news-meta">
+                <time class="news-time">06:15</time>
+                <span class="news-source">TikTok Creative Center</span>
+                <span class="news-region">SEA</span>
+              </div>
+              <h3 class="news-headline">Skintific 在 TikTok 印尼站单周声量增长 230%</h3>
+              <p class="news-snippet">主推 Niacinamide 系列，影响同价位竞品的自然流量获取。</p>
+            </article>
+
+            <article class="news-item" data-region="kr">
+              <div class="news-meta">
+                <time class="news-time">06:00</time>
+                <span class="news-source">Olive Young 公告</span>
+                <span class="news-region">KR</span>
+              </div>
+              <h3 class="news-headline">OY 公告：与 7-Eleven 渠道合作扩张</h3>
+              <p class="news-snippet">双方将在 Q3 推出联合促销活动，覆盖韩国全境门店。</p>
+            </article>
+
+            <article class="news-item" data-region="us">
+              <div class="news-meta">
+                <time class="news-time">05:45</time>
+                <span class="news-source">TikTok Trends</span>
+                <span class="news-region">US</span>
+              </div>
+              <h3 class="news-headline">美国家居饮水器具品类社媒声量动态</h3>
+              <p class="news-snippet">主流品牌 Stanley 在 TikTok 上的提及下滑 18%。</p>
+            </article>
+
+            <article class="news-item" data-region="sea">
+              <div class="news-meta">
+                <time class="news-time">04:30</time>
+                <span class="news-source">网易出海</span>
+                <span class="news-region">SEA</span>
+              </div>
+              <h3 class="news-headline">Skintific 借短视频抢占印尼护肤市场</h3>
+              <p class="news-snippet">流量爬升节奏明显，跨境品牌需提早布局应对。</p>
+            </article>
+
+            <article class="news-item" data-region="sea">
+              <div class="news-meta">
+                <time class="news-time">03:42</time>
+                <span class="news-source">Reuters</span>
+                <span class="news-region">SEA</span>
+              </div>
+              <h3 class="news-headline">TikTok Shop Vietnam to raise commission rate from 5% to 8%</h3>
+              <p class="news-snippet">Effective June 2026. Small SKUs will be the first to feel the margin squeeze, local sellers warn.</p>
+            </article>
+
+            <article class="news-item" data-region="sea">
+              <div class="news-meta">
+                <time class="news-time">02:18</time>
+                <span class="news-source">VnExpress</span>
+                <span class="news-region">SEA</span>
+              </div>
+              <h3 class="news-headline">TikTok 越南站提佣方案落地，本地卖家担忧</h3>
+              <p class="news-snippet">多家越南本地卖家表示，新抽佣将明显影响中小品类的盈利空间。</p>
+            </article>
+
+          </div>
+
+          <div class="news-empty" hidden>
+            <span class="ph-rule"></span>
+            <span class="ph-text">No stories in this region</span>
+            <span class="ph-rule"></span>
+          </div>
+
+        </div>
+      </section>
       <section class="view" data-view="saved"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 收藏</span><span class="ph-rule"></span></div></section>
       <section class="view" data-view="settings"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 设置</span><span class="ph-rule"></span></div></section>
 
     </main>
 
+  </div>
+
+  <!-- ==================== Source viewer (right canvas + backdrop) ==================== -->
+  <div class="source-overlay" data-role="source-canvas" hidden>
+    <div class="source-backdrop" data-role="source-close" aria-hidden="true"></div>
+    <aside class="source-canvas" role="dialog" aria-label="新闻原文">
+      <header class="source-head">
+        <div class="source-meta">
+          <span class="source-eyebrow">Source</span>
+          <span class="source-name" data-bind="source-name">Source</span>
+          <time data-bind="source-time">23 May 2026</time>
+        </div>
+        <button class="source-close" data-role="source-close" type="button" aria-label="关闭">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+        </button>
+      </header>
+      <article class="source-article">
+        <h2 class="source-title" data-bind="source-title">—</h2>
+        <div class="source-content">
+          <p class="source-lede">本报讯，今日的市场动态对跨境品牌的运营策略产生显著影响，多家头部品牌已启动应对预案。</p>
+          <p>多个公开来源证实，相关政策或平台调整将在 6 月起逐步生效。受访的本地代理及品牌方表示，新规对中小品牌的执行难度更高，需在 4 周内完成内部对齐。</p>
+          <p>消息人士向本报指出，类似调整在过去 12 个月内已发生 3 次。多家头部品牌正与平台对接合规细则，预计将提前公布过渡方案，避免在旺季首日出现库存空档。</p>
+          <p>影响层面，分析师认为该变动会重塑现有运营节奏。建议品牌方在两周内完成定价模型评估，并就库存批次上架做出调整。"对中小卖家而言，节奏感比绝对成本更关键。"</p>
+        </div>
+        <a href="#" class="source-original">
+          <span>View original</span>
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h6v6M11 3L5 9"/></svg>
+        </a>
+        <p class="source-tail">— 由 AnchorMAS 战略简报整合并撰要</p>
+      </article>
+    </aside>
   </div>
 
   <script src="script.js"></script>

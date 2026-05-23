@@ -41,8 +41,9 @@ body {
 .content {
   width: 100%;
   min-height: 100vh;
+  /* iframe 里 safe-top=0 时给 32px 兜底；真机有 island 自动用 safe-top + 18 */
   padding:
-    calc(var(--safe-top) + 18px)
+    max(32px, calc(var(--safe-top) + 18px))
     16px
     calc(var(--tabbar-h) + var(--safe-bottom) + 16px);
   min-width: 0;
@@ -88,6 +89,7 @@ body {
 .brief-meta {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -254,29 +256,48 @@ body {
 .brief-stories { display: flex; flex-direction: column; }
 
 .story {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  padding: 28px 0;
+  padding: 32px 0 32px 16px;
   border-top: 0.5px solid var(--hair);
   animation: rise 0.55s both cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.story:first-child { border-top: 0; padding-top: 16px; }
+.story:first-child { border-top: 0; padding-top: 18px; }
 .story:nth-of-type(1) { animation-delay: 0.10s; }
 .story:nth-of-type(2) { animation-delay: 0.16s; }
 .story:nth-of-type(3) { animation-delay: 0.22s; }
 .story:nth-of-type(4) { animation-delay: 0.28s; }
 .story:nth-of-type(5) { animation-delay: 0.34s; }
 
+/* —— Risk spine on left edge —— */
+.story::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 32px;
+  bottom: 32px;
+  width: 2px;
+  border-radius: 1px;
+}
+.story:first-child::before { top: 18px; }
+.story[data-level="high"]::before  { background: var(--accent); }
+.story[data-level="watch"]::before { background: var(--signal-amber); }
+.story[data-level="ok"]::before    { background: var(--signal-live); }
+
 .story-num {
   font-family: var(--f-display);
   font-style: italic;
-  font-variation-settings: "opsz" 60, "SOFT" 50;
+  font-variation-settings: "opsz" 72, "SOFT" 50;
   font-weight: 400;
-  font-size: 30px;
+  font-size: 40px;
   line-height: 1;
   color: var(--ink-4);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
+.story[data-level="high"]  .story-num { color: var(--accent); opacity: 0.7; }
+.story[data-level="watch"] .story-num { color: var(--signal-amber); opacity: 0.7; }
+.story[data-level="ok"]    .story-num { color: var(--signal-live); opacity: 0.7; }
 
 .story-main { min-width: 0; }
 
@@ -310,12 +331,20 @@ body {
   text-transform: uppercase;
   color: var(--ink-4);
 }
+/* —— Metrics group (Impact + Severity + Urgency) —— */
+.story-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .story-badge {
   font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 4px 7px;
+  padding: 4px 8px;
   border-radius: 3px;
   border: 0.5px solid currentColor;
   white-space: nowrap;
@@ -325,20 +354,47 @@ body {
 .story[data-level="watch"] .story-badge { color: var(--signal-amber); }
 .story[data-level="ok"]    .story-badge { color: var(--signal-live); }
 
-.story-tags {
-  display: flex;
+.metric {
+  display: inline-flex;
   align-items: center;
-  margin-top: 6px;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--ink-3);
+  gap: 5px;
 }
-.tag + .tag::before {
-  content: "·";
-  margin: 0 9px;
+.metric-label {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--ink-4);
+}
+.metric-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.metric-chip[data-value="1"],
+.metric-chip[data-value="2"] {
+  background: rgba(95, 125, 53, 0.12);
+  color: var(--signal-live);
+  border: 0.5px solid rgba(95, 125, 53, 0.32);
+}
+.metric-chip[data-value="3"] {
+  background: rgba(200, 130, 30, 0.14);
+  color: var(--signal-amber);
+  border: 0.5px solid rgba(200, 130, 30, 0.38);
+}
+.metric-chip[data-value="4"],
+.metric-chip[data-value="5"] {
+  background: rgba(184, 71, 43, 0.12);
+  color: var(--accent);
+  border: 0.5px solid rgba(184, 71, 43, 0.38);
 }
 
 .story-headline {
@@ -378,15 +434,50 @@ body {
   color: var(--ink-2);
 }
 
+/* —— More toggle (sources/收藏/追问 折叠) —— */
+.story-more {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin-top: 18px;
+  padding: 8px 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.story-more .more-rule {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--hair);
+  transition: background 0.15s ease;
+}
+.story-more .more-glyph {
+  font-family: var(--f-display);
+  font-size: 18px;
+  line-height: 0.9;
+  color: var(--ink-4);
+  letter-spacing: 0.06em;
+  transition: color 0.15s ease, transform 0.2s ease;
+}
+.story-more:hover .more-glyph { color: var(--ink-2); }
+.story-more:hover .more-rule { background: var(--hair-strong); }
+.story-more[aria-expanded="true"] .more-glyph {
+  color: var(--accent);
+  transform: rotate(90deg);
+}
+
 .story-foot {
-  margin-top: 16px;
+  margin-top: 14px;
   padding-top: 12px;
-  border-top: 0.5px dashed var(--hair);
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
+  animation: rise 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
+.story-foot[hidden] { display: none; }
 
 .story-sources {
   display: flex;
@@ -618,3 +709,369 @@ body {
   border-width: 1.2px;
   right: -1px; bottom: -1px;
 }
+
+/* ==================== News Feed ==================== */
+.news-view {
+  margin: 0 auto;
+  padding: 0 0 56px;
+  /* NOTE: 不能在这里加 transform 动画，否则 .news-head 的 position:fixed 会以
+     news-view 为定位参考，丢掉视口 freeze 行为 */
+}
+
+/* —— News header: fixed at top of viewport (glass) —— */
+.news-head {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 50;
+  background: rgba(244, 239, 229, 0.82);
+  -webkit-backdrop-filter: saturate(180%) blur(18px);
+  backdrop-filter: saturate(180%) blur(18px);
+  border-bottom: 0.5px solid var(--hair);
+  /* iframe 里 safe-top=0；真机 island/notch 自动让位（取较大值） */
+  padding-top: max(32px, calc(var(--safe-top) + 14px));
+  padding-left: 16px;
+  padding-right: 16px;
+  padding-bottom: 12px;
+}
+
+.news-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+}
+.news-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.news-title-en {
+  font-family: var(--f-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 72, "SOFT" 0;
+  font-size: 30px;
+  line-height: 0.95;
+  letter-spacing: -0.018em;
+  color: var(--ink);
+}
+.news-title-cn {
+  font-family: var(--f-cn);
+  font-weight: 500;
+  font-size: 17px;
+  color: var(--ink-2);
+  letter-spacing: 0.04em;
+}
+
+/* —— Filter pills —— */
+.news-filters {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 -16px;
+  padding: 2px 16px;
+}
+.news-filters::-webkit-scrollbar { display: none; }
+
+.news-pill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  font-family: var(--f-cn);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 0.5px solid var(--hair);
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.news-pill:hover { background: var(--paper-2); border-color: var(--hair-strong); }
+.news-pill:active { transform: scale(0.97); }
+.news-pill.is-active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+/* —— News list (clears fixed header via padding-top) —— */
+.news-list {
+  display: flex;
+  flex-direction: column;
+  /* .content 已经有 max(32, safe+18) 的顶 padding，这里只补 header 高度差 */
+  padding: 100px 16px 0;
+}
+
+.news-item {
+  padding: 18px 0;
+  border-top: 0.5px solid var(--hair);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.news-item:first-child { border-top: 0; padding-top: 0; }
+.news-item:hover { background: rgba(26, 24, 20, 0.025); }
+.news-item:active { background: rgba(26, 24, 20, 0.04); }
+
+.news-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 8px;
+}
+.news-time {
+  color: var(--ink-2);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-feature-settings: "tnum";
+}
+.news-rel {
+  color: var(--ink-4);
+  font-weight: 400;
+}
+.news-rel::before {
+  content: "·";
+  margin-right: 5px;
+  opacity: 0.5;
+}
+.news-source {
+  color: var(--ink-2);
+  font-family: var(--f-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 14;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.news-region {
+  margin-left: auto;
+  color: var(--ink-4);
+  padding: 2px 6px;
+  border: 0.5px solid var(--hair);
+  border-radius: 3px;
+}
+
+.news-headline {
+  font-family: var(--f-cn);
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 1.42;
+  color: var(--ink);
+  letter-spacing: 0.005em;
+  margin-bottom: 6px;
+}
+.news-snippet {
+  font-family: var(--f-body);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-3);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* —— Empty state —— */
+.news-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 60px 0;
+}
+.news-empty .ph-rule { width: 48px; height: 1px; background: var(--hair); }
+.news-empty .ph-text {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+
+/* —— Region filter via attribute selectors —— */
+.news-view[data-active-region="cn"]  .news-item:not([data-region="cn"]),
+.news-view[data-active-region="jp"]  .news-item:not([data-region="jp"]),
+.news-view[data-active-region="kr"]  .news-item:not([data-region="kr"]),
+.news-view[data-active-region="sea"] .news-item:not([data-region="sea"]),
+.news-view[data-active-region="us"]  .news-item:not([data-region="us"]) {
+  display: none;
+}
+
+/* ==================== Source viewer (bottom sheet) ==================== */
+.source-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+.source-sheet[hidden] { display: none !important; }
+
+.source-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(26, 24, 20, 0.42);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: fadeIn 0.22s ease both;
+}
+.source-sheet[data-state="closing"] .source-backdrop {
+  animation: fadeOut 0.26s ease both;
+}
+
+.source-panel {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 75vh;
+  background: var(--paper);
+  border-radius: 22px 22px 0 0;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -20px 50px rgba(26, 24, 20, 0.20);
+  animation: slideUp 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  padding-bottom: var(--safe-bottom);
+}
+.source-sheet[data-state="closing"] .source-panel {
+  animation: slideDown 0.28s cubic-bezier(0.6, 0, 0.85, 0.55) both;
+}
+
+.source-handle {
+  width: 38px;
+  height: 4px;
+  background: var(--ink-3);
+  border-radius: 2px;
+  margin: 10px auto 4px;
+  opacity: 0.35;
+}
+
+.source-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px 16px;
+  border-bottom: 0.5px solid var(--hair);
+}
+.source-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.source-eyebrow {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+.source-name {
+  font-family: var(--f-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 24;
+  font-size: 17px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+.source-meta time {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.source-close {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(26, 24, 20, 0.06);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.source-close svg { width: 13px; height: 13px; }
+.source-close:hover { background: rgba(26, 24, 20, 0.12); color: var(--ink); }
+.source-close:active { transform: scale(0.94); }
+
+.source-article {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 22px 40px;
+  /* hide inner scrollbar (consistent with mobile policy) */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.source-article::-webkit-scrollbar { width: 0; height: 0; }
+
+.source-title {
+  font-family: var(--f-cn);
+  font-weight: 500;
+  font-size: 20px;
+  line-height: 1.38;
+  color: var(--ink);
+  margin-bottom: 18px;
+  letter-spacing: 0.005em;
+}
+.source-content {
+  font-family: var(--f-body);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+.source-content p { margin-bottom: 14px; }
+.source-content .source-lede {
+  font-family: var(--f-display);
+  font-variation-settings: "opsz" 24;
+  font-size: 17px;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--ink);
+}
+
+.source-original {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 22px;
+  padding: 8px 14px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-decoration: none;
+  border: 0.5px solid var(--accent);
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+.source-original:hover { background: var(--accent-soft); }
+.source-original svg { width: 11px; height: 11px; }
+
+.source-tail {
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 0.5px dashed var(--hair);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-4);
+}
+
+@keyframes fadeIn   { from { opacity: 0; }                 to { opacity: 1; } }
+@keyframes fadeOut  { from { opacity: 1; }                 to { opacity: 0; } }
+@keyframes slideUp   { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes slideDown { from { transform: translateY(0); }    to { transform: translateY(100%); } }

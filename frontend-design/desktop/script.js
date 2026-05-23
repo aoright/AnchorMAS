@@ -57,13 +57,13 @@
     $$('[data-bind="date-text"]').forEach((el) => { el.textContent = fmtDate(state.date); });
     $$('[data-bind="date-input"]').forEach((el) => { el.value = state.date; });
     $$('[data-bind="region-text"]').forEach((el) => { el.textContent = REGIONS[state.region].cn; });
-    $$('.region-menu li').forEach((li) => {
+    $$('.region-picker[data-scope="brief"] .region-menu li').forEach((li) => {
       li.setAttribute('aria-selected', li.dataset.region === state.region ? 'true' : 'false');
     });
   }
   function closeMenus() {
-    $$('.region-menu').forEach((m) => { m.hidden = true; });
-    $$('[data-role="region-trigger"]').forEach((t) => { t.setAttribute('aria-expanded', 'false'); });
+    $$('.region-picker[data-scope="brief"] .region-menu').forEach((m) => { m.hidden = true; });
+    $$('.region-picker[data-scope="brief"] [data-role="region-trigger"]').forEach((t) => { t.setAttribute('aria-expanded', 'false'); });
   }
 
   document.addEventListener('click', (e) => {
@@ -77,9 +77,9 @@
       e.stopPropagation();
       return;
     }
-    const regionTrig = e.target.closest('[data-role="region-trigger"]');
+    const regionTrig = e.target.closest('.region-picker[data-scope="brief"] [data-role="region-trigger"]');
     if (regionTrig) {
-      const menu = regionTrig.closest('.region-picker')?.querySelector('.region-menu');
+      const menu = regionTrig.closest('.region-picker').querySelector('.region-menu');
       if (!menu) return;
       const willOpen = menu.hidden;
       closeMenus();
@@ -90,7 +90,7 @@
       e.stopPropagation();
       return;
     }
-    const opt = e.target.closest('.region-menu li[data-region]');
+    const opt = e.target.closest('.region-picker[data-scope="brief"] .region-menu li[data-region]');
     if (opt) {
       state.region = opt.dataset.region;
       render(); persist(); closeMenus();
@@ -112,4 +112,180 @@
   });
 
   render();
+})();
+
+/* ============================================================
+ * Story more-toggle (折叠 sources/收藏/追问)
+ * ============================================================ */
+(function () {
+  document.addEventListener('click', (e) => {
+    const trig = e.target.closest('.story-more');
+    if (!trig) return;
+    const story = trig.closest('.story');
+    if (!story) return;
+    const foot = story.querySelector('.story-foot');
+    if (!foot) return;
+    const willOpen = foot.hidden;
+    foot.hidden = !willOpen;
+    trig.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  });
+})();
+
+/* ============================================================
+ * News feed: enrich time display with relative "Xh ago"
+ * ============================================================ */
+(function () {
+  const NOW_MIN = 12 * 60 + 30;
+  function relAgo(timeStr) {
+    const m = /^(\d{1,2}):(\d{2})/.exec(timeStr.trim());
+    if (!m) return '';
+    const itemMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const diff = NOW_MIN - itemMin;
+    if (diff < 1) return 'just now';
+    if (diff < 60) return `${diff}m ago`;
+    return `${Math.round(diff / 60)}h ago`;
+  }
+  document.querySelectorAll('.news-time').forEach((t) => {
+    if (t.nextElementSibling && t.nextElementSibling.classList.contains('news-rel')) return;
+    const rel = relAgo(t.textContent);
+    if (!rel) return;
+    const span = document.createElement('span');
+    span.className = 'news-rel';
+    span.textContent = rel;
+    t.after(span);
+  });
+})();
+
+/* ============================================================
+ * News feed: region filter — driven by sidebar region picker
+ *   (Desktop: 没有 inline pills；sidebar 里的 data-scope="news" picker 控制)
+ * ============================================================ */
+(function () {
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+  const view = document.querySelector('.news-view');
+  if (!view) return;
+
+  const REGIONS = {
+    all: '全部市场', cn: '中国', jp: '日本',
+    kr: '韩国', sea: '东南亚', us: '美国',
+  };
+
+  let region = 'all';
+  try {
+    const saved = localStorage.getItem('anchormas:news-region');
+    if (saved && saved in REGIONS) region = saved;
+  } catch (_) {}
+
+  function render() {
+    view.setAttribute('data-active-region', region);
+    $$('[data-bind="news-region-text"]').forEach((el) => { el.textContent = REGIONS[region]; });
+    $$('.region-picker[data-scope="news"] .region-menu li').forEach((li) => {
+      li.setAttribute('aria-selected', li.dataset.region === region ? 'true' : 'false');
+    });
+  }
+  function persist() {
+    try { localStorage.setItem('anchormas:news-region', region); } catch (_) {}
+  }
+  function closeMenu() {
+    const m = document.querySelector('.region-picker[data-scope="news"] .region-menu');
+    if (m) m.hidden = true;
+    const t = document.querySelector('[data-role="news-region-trigger"]');
+    if (t) t.setAttribute('aria-expanded', 'false');
+  }
+
+  document.addEventListener('click', (e) => {
+    const trig = e.target.closest('[data-role="news-region-trigger"]');
+    if (trig) {
+      const menu = trig.closest('.region-picker')?.querySelector('.region-menu');
+      if (!menu) return;
+      const willOpen = menu.hidden;
+      closeMenu();
+      if (willOpen) {
+        menu.hidden = false;
+        trig.setAttribute('aria-expanded', 'true');
+      }
+      e.stopPropagation();
+      return;
+    }
+    const opt = e.target.closest('.region-picker[data-scope="news"] .region-menu li[data-region]');
+    if (opt) {
+      region = opt.dataset.region;
+      render(); persist(); closeMenu();
+      e.stopPropagation();
+      return;
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeMenu();
+  });
+
+  render();
+})();
+
+/* ============================================================
+ * Source viewer (right canvas)
+ * - 从 story-sources 链接 + news-item 都能打开
+ * ============================================================ */
+(function () {
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+  const viewer = document.querySelector('[data-role="source-canvas"]');
+  if (!viewer) return;
+
+  function populate({ name, time, title }) {
+    $$('[data-bind="source-name"]').forEach((el) => { el.textContent = name; });
+    $$('[data-bind="source-time"]').forEach((el) => {
+      el.textContent = time ? `${time} · 23 May 2026` : '23 May 2026';
+    });
+    $$('[data-bind="source-title"]').forEach((el) => { el.textContent = title; });
+  }
+
+  function show() {
+    delete viewer.dataset.state;
+    viewer.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+  function openFromStoryLink(linkEl) {
+    const story = linkEl.closest('.story');
+    populate({
+      title: story?.querySelector('.story-headline')?.textContent.trim() || '',
+      name: linkEl.querySelector('.src-name')?.textContent.trim() || 'Source',
+      time: linkEl.querySelector('time')?.textContent.trim() || '',
+    });
+    show();
+  }
+  function openFromNewsItem(itemEl) {
+    populate({
+      title: itemEl.querySelector('.news-headline')?.textContent.trim() || '',
+      name: itemEl.querySelector('.news-source')?.textContent.trim() || 'Source',
+      time: itemEl.querySelector('.news-time')?.textContent.trim() || '',
+    });
+    show();
+  }
+  let closingTimer = null;
+  function close() {
+    if (viewer.hidden) return;
+    if (closingTimer) clearTimeout(closingTimer);
+    viewer.dataset.state = 'closing';
+    closingTimer = setTimeout(() => {
+      viewer.hidden = true;
+      delete viewer.dataset.state;
+      document.body.style.overflow = '';
+      closingTimer = null;
+    }, 280);
+  }
+
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('.story-sources a');
+    if (link) { e.preventDefault(); openFromStoryLink(link); return; }
+
+    const newsItem = e.target.closest('.news-item');
+    if (newsItem) { openFromNewsItem(newsItem); return; }
+
+    if (e.target.closest('[data-role="source-close"]')) { close(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !viewer.hidden) close();
+  });
 })();
