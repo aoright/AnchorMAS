@@ -1,20 +1,18 @@
 {
   "date": "2026-05-23",
-  "edition": 42,
   "generated_at": "2026-05-23T08:30:00+08:00",
 
   "lead": {
-    "summary_en": "Five overseas markets registered material movement today.",
-    "summary_cn": "三起平台 / 法规变动正在重塑跨境运营节奏。",
-    "highlight":  "中国、东南亚需立即关注"
+    "summary":   "Five overseas markets registered material movement today. 中国、东南亚需立即关注，三起平台 / 法规变动正在重塑跨境运营节奏。",
+    "highlight": "中国、东南亚需立即关注"
   },
 
   "stories": [
     {
-      "id":     "2026-05-23-cn-01",
-      "rank":   1,
-      "region": "cn",
-      "market": { "cn": "中国", "en": "China" },
+      "id":            "2026-05-23-cn-01",
+      "rank":          1,
+      "region":        "cn",
+      "country_focus": null,
 
       "impact": { "category": "risk", "severity": 4, "urgency": 4 },
       "tags":   ["regulation", "platform"],
@@ -42,10 +40,10 @@
     },
 
     {
-      "id":     "2026-05-23-jp-01",
-      "rank":   2,
-      "region": "jp",
-      "market": { "cn": "日本", "en": "Japan" },
+      "id":            "2026-05-23-jp-01",
+      "rank":          2,
+      "region":        "jp",
+      "country_focus": null,
 
       "impact": { "category": "attention", "severity": 2, "urgency": 2 },
       "tags":   ["regulation", "product"],
@@ -73,10 +71,10 @@
     },
 
     {
-      "id":     "2026-05-23-kr-01",
-      "rank":   3,
-      "region": "kr",
-      "market": { "cn": "韩国", "en": "Korea" },
+      "id":            "2026-05-23-kr-01",
+      "rank":          3,
+      "region":        "kr",
+      "country_focus": null,
 
       "impact": { "category": "opportunity", "severity": 3, "urgency": 3 },
       "tags":   ["platform"],
@@ -104,10 +102,10 @@
     },
 
     {
-      "id":     "2026-05-23-sea-01",
-      "rank":   4,
-      "region": "sea",
-      "market": { "cn": "东南亚", "en": "Southeast Asia", "country_focus": "VN" },
+      "id":            "2026-05-23-sea-01",
+      "rank":          4,
+      "region":        "sea",
+      "country_focus": "VN",
 
       "impact": { "category": "risk", "severity": 5, "urgency": 4 },
       "tags":   ["platform", "regulation"],
@@ -142,10 +140,10 @@
     },
 
     {
-      "id":     "2026-05-23-us-01",
-      "rank":   5,
-      "region": "us",
-      "market": { "cn": "美国", "en": "United States" },
+      "id":            "2026-05-23-us-01",
+      "rank":          5,
+      "region":        "us",
+      "country_focus": null,
 
       "impact": { "category": "opportunity", "severity": 3, "urgency": 2 },
       "tags":   ["product", "competition", "social"],
