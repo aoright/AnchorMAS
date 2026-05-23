@@ -87,9 +87,13 @@ AIRS（深圳市人工智能与机器人研究院）× 玲界 / OpenAgent。
 
 ## 当前状态
 
-- 目录刚初始化，没有代码
-- 还在选型阶段：技术栈、信息源接入方式、Agent 架构、输出形态都未定
-- 下一步：先拆解赛题、列出关键设计决策（信息源 / Agent 编排 / 输出格式 / 演示形式），再开工
+- 已整理为多工作区仓库：
+  - `agent/`：Rust MAS Agent 运行时、采集分析 pipeline、SQLite/Qdrant 存储、HTTP API
+  - `frontend/`：React 监控面板，用于查看原始数据、pipeline 状态、简报和 Agent Evolution
+  - `frontend-design/`：设计前端团队维护的静态页面原型
+  - `backend/`：预留给对接产品前端的后端服务
+- 当前 Agent 实现已覆盖公开信息采集、过滤、分析、验证、简报生成和动态 playbook 演化。
+- 下一步：对齐 `frontend-design/` 与 `frontend/` 的数据契约，再由 `backend/` 承接面向产品前端的接口编排。
 
 ---
 
