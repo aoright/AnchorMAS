@@ -177,6 +177,8 @@ struct ChatRequest {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,6 +254,7 @@ impl DoubaoClient {
             ],
             temperature: 0.3,
             response_format,
+            stream: None,
         };
 
         let max_retries = 3u32;
@@ -326,6 +329,138 @@ impl DoubaoClient {
 
         anyhow::bail!("LLM API failed after {} retries: {}", max_retries, last_error)
     }
+
+    /// Send a chat completion request with streaming enabled.
+    /// Returns a stream of delta tokens.
+    pub async fn chat_stream(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<impl futures_util::Stream<Item = Result<String, reqwest::Error>> + Send> {
+        let request_body = ChatRequest {
+            model: self.endpoint_id.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_prompt.to_string(),
+                },
+            ],
+            temperature: 0.3,
+            response_format: None,
+            stream: Some(true),
+        };
+
+        let response = self
+            .client
+            .post(&self.api_url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read error body".to_string());
+            anyhow::bail!("LLM API returned status {}: {}", status, error_body);
+        }
+
+        let stream = response.bytes_stream();
+        
+        let s = futures_util::stream::unfold(
+            (stream, String::new(), false),
+            move |(mut stream, mut buffer, mut done)| async move {
+                if done {
+                    return None;
+                }
+                
+                use futures_util::StreamExt;
+                
+                loop {
+                    // Check if we have any full lines in the buffer
+                    if let Some(line_idx) = buffer.find('\n') {
+                        let line = buffer[..line_idx].trim().to_string();
+                        buffer = buffer[line_idx + 1..].to_string();
+                        
+                        if line.starts_with("data:") {
+                            let data_content = line["data:".len()..].trim();
+                            if data_content == "[DONE]" {
+                                done = true;
+                                return Some((Ok(String::new()), (stream, buffer, done)));
+                            }
+                            
+                            // Parse JSON
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data_content) {
+                                if let Some(content) = val
+                                    .get("choices")
+                                    .and_then(|c| c.as_array())
+                                    .and_then(|c| c.first())
+                                    .and_then(|c| c.get("delta"))
+                                    .and_then(|d| d.get("content"))
+                                    .and_then(|c| c.as_str())
+                                {
+                                    return Some((Ok(content.to_string()), (stream, buffer, done)));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    
+                    // Read next chunk from network
+                    match stream.next().await {
+                        Some(Ok(bytes)) => {
+                            let s = String::from_utf8_lossy(&bytes);
+                            buffer.push_str(&s);
+                        }
+                        Some(Err(e)) => {
+                            done = true;
+                            return Some((Err(e), (stream, buffer, done)));
+                        }
+                        None => {
+                            // Stream ended. Check if anything is left in buffer
+                            let mut yielded_content = None;
+                            if !buffer.is_empty() {
+                                let line = buffer.trim().to_string();
+                                buffer.clear();
+                                if line.starts_with("data:") {
+                                    let data_content = line["data:".len()..].trim();
+                                    if data_content != "[DONE]" {
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(data_content) {
+                                            if let Some(content) = val
+                                                .get("choices")
+                                                .and_then(|c| c.as_array())
+                                                .and_then(|c| c.first())
+                                                .and_then(|c| c.get("delta"))
+                                                .and_then(|d| d.get("content"))
+                                                .and_then(|c| c.as_str())
+                                            {
+                                                yielded_content = Some(content.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            done = true;
+                            if let Some(content) = yielded_content {
+                                return Some((Ok(content), (stream, buffer, done)));
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        );
+
+        Ok(s)
+    }
 }
 
 // ─── Pipeline Orchestrator ──────────────────────────────────────────────────
@@ -357,7 +492,7 @@ where
 
     let doubao = DoubaoClient::new(&config.ark_api_key, &config.ark_endpoint_id, &config.llm_api_url);
 
-    let (new_raw_docs, cache_message) = if synthesize_only {
+    let (mut new_raw_docs, cache_message) = if synthesize_only {
         (Vec::new(), "Synthesize only mode: loading historical events and bypassing harvester".to_string())
     } else {
         // Step 1: Harvest
@@ -385,7 +520,7 @@ where
 
         let (docs, _updated_existing_count, cache_msg) = if force {
             if !raw_docs.is_empty() {
-                save_raw_articles(pool, &raw_docs).await?;
+                save_raw_articles(pool, &raw_docs, config).await?;
                 if let Some(qclient) = qdrant {
                     let collection = &config.qdrant_collection;
                     if let Err(e) = crate::vectordb::store_documents(qclient, collection, &raw_docs, config).await {
@@ -437,7 +572,7 @@ where
 
             // Save only new articles to SQLite and Qdrant
             if !new_raw_docs.is_empty() {
-                save_raw_articles(pool, &new_raw_docs).await?;
+                save_raw_articles(pool, &new_raw_docs, config).await?;
 
                 if let Some(qclient) = qdrant {
                     let collection = &config.qdrant_collection;
@@ -478,6 +613,58 @@ where
         (docs, cache_msg)
     };
 
+    // Filter and re-crawl raw documents that only contain title/summary
+    let mut long_docs = Vec::new();
+    let mut short_docs = Vec::new();
+    for doc in new_raw_docs {
+        if doc.content.chars().count() < 120 {
+            short_docs.push(doc);
+        } else {
+            long_docs.push(doc);
+        }
+    }
+
+    if !short_docs.is_empty() {
+        tracing::info!("Found {} raw articles with only title/summary. Re-attempting full content crawl...", short_docs.len());
+        let _ = progress(PipelineProgress {
+            current_step: Some(PipelineStep::Harvester),
+            message: Some(format!("Re-fetching full content for {} short articles", short_docs.len())),
+            ..PipelineProgress::default()
+        })
+        .await;
+
+        let enriched_short_docs = harvester::enrich_article_contents(&http_client, short_docs, |_p| std::future::ready(())).await;
+        
+        for doc in enriched_short_docs {
+            if doc.content.chars().count() >= 120 {
+                tracing::info!("Successfully crawled full content for: {}", doc.title);
+                sqlx::query("UPDATE raw_articles SET content = ? WHERE source_url = ? OR resolved_url = ?")
+                    .bind(&doc.content)
+                    .bind(&doc.source_url)
+                    .bind(&doc.source_url)
+                    .execute(pool)
+                    .await
+                    .context("Failed to update raw article with re-fetched content")?;
+
+                if let Some(qclient) = qdrant {
+                    let collection = &config.qdrant_collection;
+                    let _ = crate::vectordb::store_documents(qclient, collection, &[doc.clone()], config).await;
+                }
+
+                long_docs.push(doc);
+            } else {
+                tracing::warn!("Failed to crawl full content again. Marking article as invalid: {}", doc.title);
+                sqlx::query("UPDATE raw_articles SET pipeline_status = 'invalid' WHERE source_url = ? OR resolved_url = ?")
+                    .bind(&doc.source_url)
+                    .bind(&doc.source_url)
+                    .execute(pool)
+                    .await
+                    .context("Failed to mark raw article as invalid")?;
+            }
+        }
+    }
+
+    new_raw_docs = long_docs;
 
     let mut consensus_events = Vec::new();
 
@@ -711,7 +898,7 @@ where
     let briefing = if merged_events.is_empty() {
         StrategicBriefing {
             id: Uuid::new_v4().to_string(),
-            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
             overview: "今日未发现值得关注的重大珠宝行业事件。".to_string(),
             heatmap: HashMap::new(),
             events: Vec::new(),
@@ -757,11 +944,13 @@ where
     }
 
     // Trigger Agent Parliament Stagnation Audit and Probation Checks
-    if let Err(e) = parliament::run_stagnation_audit(pool, &doubao).await {
-        tracing::error!("Parliament stagnation audit failed: {}", e);
-    }
-    if let Err(e) = parliament::check_probation_agents(pool).await {
-        tracing::error!("Parliament probation check failed: {}", e);
+    if !synthesize_only {
+        if let Err(e) = parliament::run_stagnation_audit(pool, &doubao).await {
+            tracing::error!("Parliament stagnation audit failed: {}", e);
+        }
+        if let Err(e) = parliament::check_probation_agents(pool).await {
+            tracing::error!("Parliament probation check failed: {}", e);
+        }
     }
 
     progress(PipelineProgress {
@@ -777,11 +966,33 @@ where
 
 // ─── Database Persistence Helpers ───────────────────────────────────────────
 
-async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()> {
+async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument], config: &Config) -> Result<()> {
+    let doubao = DoubaoClient::new(&config.ark_api_key, &config.ark_endpoint_id, &config.llm_api_url);
     for doc in docs {
         let id = Uuid::new_v4().to_string();
         let orig_url = doc.original_url.as_deref().unwrap_or(&doc.source_url);
         let res_url = doc.original_url.as_ref().map(|_| &doc.source_url);
+        
+        let mut title = doc.title.clone();
+        let mut content = doc.content.clone();
+        let mut raw_language = doc.raw_language.clone();
+        
+        let lang_lower = raw_language.to_lowercase();
+        let is_chinese = lang_lower == "zh" || lang_lower.starts_with("zh-") || lang_lower == "cn";
+        if !is_chinese {
+            tracing::info!("Translating raw article during ingestion: title={}", title);
+            match translate_article_to_chinese(&doubao, &title, &content).await {
+                Ok((trans_title, trans_content)) => {
+                    title = trans_title;
+                    content = trans_content;
+                    raw_language = "zh".to_string();
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to translate raw article during ingestion");
+                }
+            }
+        }
+
         sqlx::query(
             r#"INSERT OR IGNORE INTO raw_articles (id, source_url, resolved_url, title, content, raw_language, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)"#,
@@ -789,9 +1000,9 @@ async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()
         .bind(&id)
         .bind(orig_url)
         .bind(res_url)
-        .bind(&doc.title)
-        .bind(&doc.content)
-        .bind(&doc.raw_language)
+        .bind(&title)
+        .bind(&content)
+        .bind(&raw_language)
         .bind(&doc.timestamp)
         .execute(pool)
         .await
@@ -917,7 +1128,7 @@ async fn load_unprocessed_today_and_yesterday_raw_articles(pool: &SqlitePool) ->
     let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
         r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
            FROM raw_articles
-           WHERE date(created_at) >= ? AND (pipeline_status IS NULL OR pipeline_status <> 'processed')
+           WHERE date(created_at) >= ? AND (pipeline_status IS NULL OR pipeline_status NOT IN ('processed', 'invalid'))
            ORDER BY created_at DESC"#,
     )
     .bind(&threshold)
@@ -943,7 +1154,7 @@ async fn load_unprocessed_recent_raw_articles(pool: &SqlitePool, limit: i64) -> 
     let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
         r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
            FROM raw_articles
-           WHERE pipeline_status IS NULL OR pipeline_status <> 'processed'
+           WHERE pipeline_status IS NULL OR pipeline_status NOT IN ('processed', 'invalid')
            ORDER BY created_at DESC
            LIMIT ?"#,
     )
@@ -969,21 +1180,24 @@ async fn load_unprocessed_recent_raw_articles(pool: &SqlitePool, limit: i64) -> 
 async fn save_briefing(pool: &SqlitePool, briefing: &StrategicBriefing) -> Result<()> {
     let heatmap_json = serde_json::to_string(&briefing.heatmap)?;
     let recommendations_json = serde_json::to_string(&briefing.recommendations)?;
+    let created_at_val = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
 
     sqlx::query(
-        r#"INSERT INTO briefings (id, date, overview, heatmap_json, recommendations_json)
-           VALUES (?, ?, ?, ?, ?)
+        r#"INSERT INTO briefings (id, date, overview, heatmap_json, recommendations_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              date = excluded.date,
              overview = excluded.overview,
              heatmap_json = excluded.heatmap_json,
-             recommendations_json = excluded.recommendations_json"#,
+             recommendations_json = excluded.recommendations_json,
+             created_at = excluded.created_at"#,
     )
     .bind(&briefing.id)
     .bind(&briefing.date)
     .bind(&briefing.overview)
     .bind(&heatmap_json)
     .bind(&recommendations_json)
+    .bind(&created_at_val)
     .execute(pool)
     .await
     .context("Failed to save briefing")?;
@@ -1003,7 +1217,7 @@ async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEve
         let source_urls_json = serde_json::to_string(&filtered_urls)?;
         
         // Find the created_at timestamp of the first source URL that exists in raw_articles
-        let mut created_at_val = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut created_at_val = chrono::Utc::now().format("%Y-%m-%d").to_string();
         for url in &filtered_urls {
             if let Ok(Some(ts)) = sqlx::query_scalar::<_, String>(
                 "SELECT created_at FROM raw_articles WHERE source_url = ? OR resolved_url = ? LIMIT 1"
@@ -1013,6 +1227,10 @@ async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEve
             .fetch_optional(pool)
             .await
             {
+                let mut ts = ts;
+                if ts.len() > 10 {
+                    ts.truncate(10);
+                }
                 created_at_val = ts;
                 break;
             }
@@ -1137,11 +1355,33 @@ async fn load_today_and_yesterday_events(pool: &SqlitePool) -> Result<Vec<Analyz
     .await
     .context("Failed to load today and yesterday's events")?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis)| {
-            let urls = serde_json::from_str(&source_urls).unwrap_or_default();
-            AnalyzedEvent {
+    let mut valid_events = Vec::new();
+    for (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis) in rows {
+        let urls: Vec<String> = serde_json::from_str(&source_urls).unwrap_or_default();
+        
+        let mut all_invalid = true;
+        if urls.is_empty() {
+            all_invalid = false;
+        } else {
+            for url in &urls {
+                let status: Option<String> = sqlx::query_scalar(
+                    "SELECT pipeline_status FROM raw_articles WHERE source_url = ? OR resolved_url = ? LIMIT 1"
+                )
+                .bind(url)
+                .bind(url)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+                
+                if status.as_deref() != Some("invalid") {
+                    all_invalid = false;
+                    break;
+                }
+            }
+        }
+
+        if !all_invalid {
+            valid_events.push(AnalyzedEvent {
                 id,
                 market,
                 category,
@@ -1153,9 +1393,15 @@ async fn load_today_and_yesterday_events(pool: &SqlitePool) -> Result<Vec<Analyz
                 urgency: urgency as i32,
                 confidence: confidence as i32,
                 analysis,
-            }
-        })
-        .collect())
+            });
+        } else {
+            tracing::info!("Excluding and deleting event based on invalid raw articles: {}", title);
+            let _ = sqlx::query("DELETE FROM events WHERE id = ?").bind(&id).execute(pool).await;
+            let _ = sqlx::query("DELETE FROM briefing_events WHERE event_id = ?").bind(&id).execute(pool).await;
+        }
+    }
+
+    Ok(valid_events)
 }
 
 
@@ -1333,4 +1579,34 @@ pub async fn get_agent_prompt(pool: &sqlx::SqlitePool, role_id: &str, default_pr
     } else {
         default_prompt.to_string()
     }
+}
+
+pub async fn translate_article_to_chinese(
+    doubao: &DoubaoClient,
+    title: &str,
+    content: &str,
+) -> anyhow::Result<(String, String)> {
+    let system_prompt = "你是一个高水平的专业珠宝与商业新闻翻译家。你的任务是将输入的新闻标题与正文翻译成流畅、精准的中文。保证原意不丢失，文字表达符合中文阅读习惯。请直接返回翻译后的 JSON 格式，禁止包含任何外层包装或 markdown 标记。\n\
+JSON 格式示例：\n\
+{\n\
+  \"title\": \"翻译后的中文标题\",\n\
+  \"content\": \"翻译后的中文正文\"\n\
+}";
+
+    let user_prompt = format!("标题: {}\n正文: {}", title, content);
+    let res = doubao.chat(system_prompt, &user_prompt, true).await?;
+    let cleaned_res = res.trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    #[derive(serde::Deserialize)]
+    struct TranslatedResult {
+        title: String,
+        content: String,
+    }
+
+    let parsed: TranslatedResult = serde_json::from_str(cleaned_res)?;
+    Ok((parsed.title, parsed.content))
 }

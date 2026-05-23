@@ -106,8 +106,8 @@ pub async fn crawl_web_for_keywords(
 
                         if !link.is_empty() {
                             let ts = entry.published
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                                .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                                .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
                             docs.push(RawDocument {
                                 source_url: link,
                                 title,
@@ -212,7 +212,10 @@ pub async fn save_crawled_event(
     .await;
 
     // 2. Save to SQLite events
-    let created_at_val = created_at.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    let mut created_at_val = created_at.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+    if created_at_val.len() > 10 {
+        created_at_val.truncate(10);
+    }
     let source_urls_json = serde_json::to_string(&event.source_urls)?;
     sqlx::query!(
         r#"INSERT INTO events

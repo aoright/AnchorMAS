@@ -81,9 +81,13 @@ function getMarketData(overviewObj, key) {
 
 function formatSnapshotLabel(item) {
   const date = item.date || 'Undated'
-  const createdAt = item.created_at || '--'
   const count = Number.isFinite(item.event_count) ? item.event_count : 0
-  return `${date} ${createdAt} / ${count} events`
+  if (date.length >= 16) {
+    return `${date} / ${count} events`
+  }
+  const createdAt = item.created_at || '--'
+  const timeStr = createdAt.length >= 16 ? createdAt.substring(11, 16) : ''
+  return timeStr ? `${date} ${timeStr} / ${count} events` : `${date} / ${count} events`
 }
 
 export default function BriefingView() {
@@ -329,7 +333,8 @@ export default function BriefingView() {
     if (!msg || chatLoading || !briefing) return
 
     const userMsg = { role: 'user', content: msg }
-    setChatMessages((prev) => [...prev, userMsg])
+    const assistantMsgPlaceholder = { role: 'assistant', content: '' }
+    setChatMessages((prev) => [...prev, userMsg, assistantMsgPlaceholder])
     setChatInput('')
     setChatLoading(true)
 
@@ -343,22 +348,42 @@ export default function BriefingView() {
         }),
       })
       if (res.ok) {
-        const data = await res.json()
-        setChatMessages((prev) => [
-          ...prev,
-          { role: 'assistant', content: data.response || data.reply || JSON.stringify(data) },
-        ])
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let currentText = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value, { stream: true })
+          currentText += chunk
+
+          setChatMessages((prev) => {
+            const next = [...prev]
+            if (next.length > 0) {
+              next[next.length - 1] = { role: 'assistant', content: currentText }
+            }
+            return next
+          })
+        }
       } else {
-        setChatMessages((prev) => [
-          ...prev,
-          { role: 'system', content: `Error: ${res.status} ${res.statusText}` },
-        ])
+        setChatMessages((prev) => {
+          const next = [...prev]
+          if (next.length > 0) {
+            next[next.length - 1] = { role: 'system', content: `Error: ${res.status} ${res.statusText}` }
+          }
+          return next
+        })
       }
     } catch (err) {
-      setChatMessages((prev) => [
-        ...prev,
-        { role: 'system', content: `Connection error: ${err.message}` },
-      ])
+      setChatMessages((prev) => {
+        const next = [...prev]
+        if (next.length > 0) {
+          next[next.length - 1] = { role: 'system', content: `Connection error: ${err.message}` }
+        }
+        return next
+      })
     } finally {
       setChatLoading(false)
     }
@@ -380,7 +405,7 @@ export default function BriefingView() {
       <div className="empty-state">
         {error || "No briefings available. Open Pipeline and run a scan to generate one."}
         <div style={{ marginTop: 12 }}>
-          <button className="btn btn--sm" onClick={fetchBriefing}>Retry</button>
+          <button className="btn btn--sm" onClick={() => fetchBriefing('latest')}>Retry</button>
         </div>
       </div>
     )
@@ -466,7 +491,7 @@ export default function BriefingView() {
           </select>
         </div>
         <div className="briefing-meta">
-          <span>Generated: {briefing.created_at || selectedSnapshot?.created_at || '--'}</span>
+          <span>Generated: {(briefing.created_at || selectedSnapshot?.created_at || '--').substring(0, 16)}</span>
           <span>Events: {rawEvents.length}</span>
           <span>Saved snapshots: {savedSnapshotCount}</span>
         </div>

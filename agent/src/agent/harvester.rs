@@ -284,8 +284,8 @@ async fn fetch_rss(client: &Client, url: &str, lang: &str, hours: Option<u32>) -
             let content = strip_html(&raw_desc);
 
             let timestamp = entry.published
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
 
             Some(RawDocument {
                 source_url: link,
@@ -301,7 +301,7 @@ async fn fetch_rss(client: &Client, url: &str, lang: &str, hours: Option<u32>) -
     Ok(docs)
 }
 
-async fn enrich_article_contents<F, Fut>(
+pub async fn enrich_article_contents<F, Fut>(
     client: &Client,
     docs: Vec<RawDocument>,
     mut progress: F,
@@ -677,8 +677,8 @@ async fn fetch_reddit(client: &Client, url: &str, hours: Option<u32>) -> Result<
                 };
 
                 let timestamp = match chrono::Utc.timestamp_opt(created_utc as i64, 0) {
-                    chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    _ => Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
+                    _ => Utc::now().format("%Y-%m-%d").to_string(),
                 };
 
                 docs.push(RawDocument {

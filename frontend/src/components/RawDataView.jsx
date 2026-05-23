@@ -2,14 +2,16 @@ import { Fragment, useState, useMemo } from 'react'
 
 function formatTimestamp(ts) {
   if (!ts) return '--'
+  if (ts.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(ts)) {
+    return ts.substring(0, 10)
+  }
   try {
     const d = new Date(ts)
+    if (isNaN(d.getTime())) return ts
     const year = d.getFullYear()
     const month = String(d.getMonth() + 1).padStart(2, '0')
     const day = String(d.getDate()).padStart(2, '0')
-    const hour = String(d.getHours()).padStart(2, '0')
-    const minute = String(d.getMinutes()).padStart(2, '0')
-    return `${year}-${month}-${day} ${hour}:${minute}`
+    return `${year}-${month}-${day}`
   } catch {
     return ts
   }
@@ -29,9 +31,17 @@ const LANGUAGE_OPTIONS = [
   { value: 'ko', label: 'Korean' },
 ]
 
+const STATUS_OPTIONS = [
+  { value: 'all', label: 'All Statuses' },
+  { value: 'unprocessed', label: 'Unprocessed' },
+  { value: 'processed', label: 'Processed' },
+  { value: 'invalid', label: 'Invalid' },
+]
+
 export default function RawDataView({ articles, loading, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null)
   const [langFilter, setLangFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchHours, setSearchHours] = useState('24')
   const [searchStatus, setSearchStatus] = useState('idle')
@@ -41,6 +51,12 @@ export default function RawDataView({ articles, loading, onRefresh }) {
   const filtered = useMemo(() => {
     return data.filter((item) => {
       if (langFilter !== 'all' && item.raw_language !== langFilter) return false
+      if (statusFilter !== 'all') {
+        const itemStatus = item.pipeline_status || 'unprocessed';
+        if (statusFilter === 'unprocessed' && itemStatus !== 'unprocessed') return false
+        if (statusFilter === 'processed' && itemStatus !== 'processed') return false
+        if (statusFilter === 'invalid' && itemStatus !== 'invalid') return false
+      }
       if (searchQuery) {
         const q = searchQuery.toLowerCase()
         const title = (item.title || '').toLowerCase()
@@ -49,7 +65,7 @@ export default function RawDataView({ articles, loading, onRefresh }) {
       }
       return true
     })
-  }, [data, langFilter, searchQuery])
+  }, [data, langFilter, statusFilter, searchQuery])
 
   const toggleExpand = (id) => {
     setExpandedId(expandedId === id ? null : id)
@@ -61,7 +77,7 @@ export default function RawDataView({ articles, loading, onRefresh }) {
       const res = await fetch(`/api/scan?hours=${searchHours}`, { method: 'POST' })
       if (res.ok || res.status === 202) {
         setSearchStatus('triggered')
-        alert('新闻搜索/扫描已在后台启动！您可以切换到 Pipeline 标签页查看实时分析进度。')
+        alert('新闻搜索/扫描已在后台启动！您可以切换到 Pipeline 标签页查看实时 analysis 进度。')
         setTimeout(() => setSearchStatus('idle'), 5000)
       } else {
         setSearchStatus('error')
@@ -88,6 +104,18 @@ export default function RawDataView({ articles, loading, onRefresh }) {
           onChange={(e) => setLangFilter(e.target.value)}
         >
           {LANGUAGE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className="input"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+        >
+          {STATUS_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
             </option>
@@ -149,6 +177,7 @@ export default function RawDataView({ articles, loading, onRefresh }) {
               <th>Title</th>
               <th>Content</th>
               <th>Chars</th>
+              <th>Status</th>
               <th>Timestamp</th>
             </tr>
           </thead>
@@ -181,6 +210,15 @@ export default function RawDataView({ articles, loading, onRefresh }) {
                     </span>
                   </td>
                   <td>
+                    {item.pipeline_status === 'invalid' ? (
+                      <span className="badge badge-status-bankrupt">Invalid</span>
+                    ) : item.pipeline_status === 'processed' ? (
+                      <span className="badge badge-status-active">Processed</span>
+                    ) : (
+                      <span className="badge badge-neutral">Unprocessed</span>
+                    )}
+                  </td>
+                  <td>
                     <span className="text-mono text-sm text-secondary">
                       {formatTimestamp(item.created_at)}
                     </span>
@@ -188,12 +226,15 @@ export default function RawDataView({ articles, loading, onRefresh }) {
                 </tr>
                 {expandedId === item.id && (
                   <tr>
-                    <td colSpan={6} style={{ padding: 0 }}>
+                    <td colSpan={7} style={{ padding: 0 }}>
                       <div className="expanded-content">
                         <div className="expanded-meta">
                           <span>ID: <span className="text-mono">{item.id}</span></span>
                           <span>Market: {item.market || '--'}</span>
                           <span>Language: {item.raw_language || '--'}</span>
+                          <span>
+                            Status: <span className="text-mono">{item.pipeline_status || 'unprocessed'}</span>
+                          </span>
                           <span>
                             Source:{' '}
                             <a

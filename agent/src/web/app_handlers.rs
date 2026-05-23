@@ -220,7 +220,7 @@ pub async fn get_news_detail(
         if !url_strings.is_empty() {
             for url_chunk in url_strings.chunks(50) {
                 let mut qb = sqlx::QueryBuilder::new(
-                    "SELECT COALESCE(resolved_url, source_url) AS source_url, title, content FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN (",
+                    "SELECT id, COALESCE(resolved_url, source_url) AS source_url, title, content, raw_language FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN (",
                 );
                 let mut sep = qb.separated(", ");
                 for url in url_chunk {
@@ -228,9 +228,9 @@ pub async fn get_news_detail(
                 }
                 sep.push_unseparated(")");
 
-                let q = qb.build_query_as::<(String, String, String)>();
+                let q = qb.build_query_as::<(String, String, String, String, String)>();
                 if let Ok(rows) = q.fetch_all(&state.pool).await {
-                    for (source_url, title, content) in rows {
+                    for (_id, source_url, title, content, _raw_language) in rows {
                         raw_sources.push(RawSourceDetail {
                             title,
                             source_url,

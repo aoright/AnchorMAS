@@ -13,7 +13,7 @@ pub async fn synthesize_briefing(
     if events.is_empty() {
         return Ok(StrategicBriefing {
             id: Uuid::new_v4().to_string(),
-            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
             overview: "今日无重大珠宝行业事件。".to_string(),
             heatmap: default_heatmap(),
             events: Vec::new(),
@@ -70,7 +70,7 @@ pub async fn synthesize_briefing(
       ]
     },
     "China": {
-      "summary": "中国珠宝市场的详细战略总结，分析宏观面、国潮趋势、主要品牌动态等，若今日无重大事件则写‘今日无重大事件’，字数在150-250字之间。",
+      "summary": "中国珠宝市场的详细战略总结，分析宏观面、国潮趋势、主要品牌动态等。注意：必须依据今日传入的该市场事件列表进行实质总结，字数在150-250字之间。只有当传入该市场的事件列表为空时，才能且必须写‘今日无重大事件’。",
       "keywords": [
         {
           "word": "关键词或短句",
@@ -80,7 +80,7 @@ pub async fn synthesize_briefing(
       ]
     },
     "Japan": {
-      "summary": "日本珠宝市场的详细战略总结，若今日无重大事件则写‘今日无重大事件’，字数在150-250字之间。",
+      "summary": "日本珠宝市场的详细战略总结。注意：必须依据今日传入的该市场事件列表进行实质总结，字数在150-250字之间。只有当传入该市场的事件列表为空时，才能且必须写‘今日无重大事件’。",
       "keywords": [
         {
           "word": "关键词或短句",
@@ -90,7 +90,7 @@ pub async fn synthesize_briefing(
       ]
     },
     "Korea": {
-      "summary": "韩国珠宝市场的详细战略总结，若今日无重大事件则写‘今日无重大事件’，字数在150-250字之间。",
+      "summary": "韩国珠宝市场的详细战略总结。注意：必须依据今日传入的该市场事件列表进行实质总结，字数在150-250字之间。只有当传入该市场的事件列表为空时，才能且必须写‘今日无重大事件’。",
       "keywords": [
         {
           "word": "关键词或短句",
@@ -100,7 +100,7 @@ pub async fn synthesize_briefing(
       ]
     },
     "SoutheastAsia": {
-      "summary": "东南亚珠宝市场的详细战略总结，若今日无重大事件则写‘今日无重大事件’，字数在150-250字之间。",
+      "summary": "东南亚珠宝市场的详细战略总结。注意：必须依据今日传入的该市场事件列表进行实质总结，字数在150-250字之间。只有当传入该市场的事件列表为空时，才能且必须写‘今日无重大事件’。",
       "keywords": [
         {
           "word": "关键词或短句",
@@ -110,7 +110,7 @@ pub async fn synthesize_briefing(
       ]
     },
     "UnitedStates": {
-      "summary": "美国珠宝市场的详细战略总结，若今日无重大事件则写‘今日无重大事件’，字数在150-250字之间。",
+      "summary": "美国珠宝市场的详细战略总结。注意：必须依据今日传入的该市场事件列表进行实质总结，字数在150-250字之间。只有当传入该市场的事件列表为空时，才能且必须写‘今日无重大事件’。",
       "keywords": [
         {
           "word": "关键词或短句",
@@ -268,7 +268,7 @@ fn parse_briefing_response(
 
     Ok(StrategicBriefing {
         id: Uuid::new_v4().to_string(),
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
         overview,
         heatmap,
         events: events.to_vec(),
@@ -301,7 +301,8 @@ pub async fn audit_briefing(
 你的任务是审查每日战略简报的质量，看它是否符合高管决策的要求。
 
 主要审计项：
-1. 综述（overview）是否过于笼统或存在拼写/语言不统一的问题（必须全中文，且具体到各市场核心动态，而不是写“今日无重大事件”或空洞套话）。
+1. 综述（overview）是否过于笼统或存在拼写/语言不统一的问题（必须全中文，且具体到各市场核心动态）。
+   注意：如果今日传入该市场的实际事件数量为 0，则该市场【必须】写为“今日无重大事件”。只有当实际事件数大于 0 时，才绝对禁止写“今日无重大事件”或空动套话，而必须具体分析。
 2. 热力图评级是否真实反映了事件的紧急度与严重度，是否与综述内容一致。
 3. 行动建议（recommendations）是否具体、可执行，是否指明了对应的业务部门和时间限制（例如，不能只写“密切关注”，而应该写“营运部本周内调整定价”）。
 
@@ -312,7 +313,7 @@ pub async fn audit_briefing(
   "critique_notes": "指出具体的问题（不超过100字），如果 approved 为 true 则写'合格'"
 }"#;
 
-    let system_prompt = super::get_agent_prompt(pool, "critic", default_system_prompt).await;
+    let system_prompt = super::get_agent_prompt(pool, "auditor", default_system_prompt).await;
 
     let briefing_json = serde_json::json!({
         "overview": briefing.overview,
@@ -320,8 +321,19 @@ pub async fn audit_briefing(
         "recommendations": briefing.recommendations,
     });
 
+    let mut market_counts = std::collections::HashMap::new();
+    for event in &briefing.events {
+        *market_counts.entry(event.market.clone()).or_insert(0) += 1;
+    }
+    let counts_str = market_counts
+        .iter()
+        .map(|(m, c)| format!("- {}: {} 个事件", m, c))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let user_prompt = format!(
-        "以下是新生成的每日战略简报，请对其质量进行审计：\n\n{}",
+        "今日各市场的实际事件数量如下：\n{}\n\n以下是新生成的每日战略简报，请对其质量进行审计：\n\n{}",
+        counts_str,
         serde_json::to_string_pretty(&briefing_json)?
     );
 
@@ -329,7 +341,7 @@ pub async fn audit_briefing(
 
     // Charge credits:
     let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
-    let _ = super::parliament::charge_compute_credits(pool, "critic", tokens as i64).await;
+    let _ = super::parliament::charge_compute_credits(pool, "auditor", tokens as i64).await;
 
     let raw_json = extract_json_object(&response);
     

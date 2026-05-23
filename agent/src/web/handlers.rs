@@ -27,6 +27,7 @@ struct RawArticleResponse {
     raw_language: String,
     market: String,
     created_at: String,
+    pipeline_status: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -79,11 +80,6 @@ pub struct ChatRequest {
     briefing_id: String,
 }
 
-#[derive(Serialize)]
-struct ChatResponse {
-    response: String,
-    briefing_id: String,
-}
 
 #[derive(Serialize)]
 struct ScanResponse {
@@ -121,7 +117,7 @@ pub async fn get_raw_articles(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let rows = sqlx::query_as::<_, RawArticleRow>(
-        r#"SELECT id, COALESCE(resolved_url, source_url) AS source_url, title, content, raw_language, market, created_at
+        r#"SELECT id, COALESCE(resolved_url, source_url) AS source_url, title, content, raw_language, market, created_at, pipeline_status
            FROM raw_articles
            ORDER BY created_at DESC
            LIMIT 500"#,
@@ -148,6 +144,7 @@ pub async fn get_raw_articles(
             raw_language: row.raw_language,
             market: row.market,
             created_at: row.created_at,
+            pipeline_status: row.pipeline_status,
         })
         .collect();
 
@@ -271,7 +268,7 @@ async fn build_briefing_response(
         let urls_vec: Vec<String> = unique_urls.into_iter().collect();
         for chunk in urls_vec.chunks(500) {
             let mut query_builder = sqlx::QueryBuilder::new(
-                "SELECT COALESCE(resolved_url, source_url) AS source_url, title, content FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN ("
+                "SELECT id, COALESCE(resolved_url, source_url) AS source_url, title, content, raw_language FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN ("
             );
             let mut separated = query_builder.separated(", ");
             for url in chunk {
@@ -279,9 +276,9 @@ async fn build_briefing_response(
             }
             separated.push_unseparated(")");
 
-            let query = query_builder.build_query_as::<(String, String, String)>();
+            let query = query_builder.build_query_as::<(String, String, String, String, String)>();
             if let Ok(rows) = query.fetch_all(&state.pool).await {
-                for (source_url, title, content) in rows {
+                for (_id, source_url, title, content, _raw_language) in rows {
                     raw_articles_map.insert(
                         source_url.clone(),
                         RawSourceResponse {
@@ -731,8 +728,8 @@ Answer professionally. If the question is outside the briefing scope, state so h
     );
 
     let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
-    let ai_response = doubao
-        .chat(&system_prompt, &payload.message, false)
+    let raw_stream = doubao
+        .chat_stream(&system_prompt, &payload.message)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Doubao chat API call failed");
@@ -744,25 +741,69 @@ Answer professionally. If the question is outside the briefing scope, state so h
             )
         })?;
 
-    let chat_id = Uuid::new_v4().to_string();
-    let _ = sqlx::query(
-        r#"INSERT INTO chat_history (id, briefing_id, user_message, ai_response)
-           VALUES (?, ?, ?, ?)"#,
-    )
-    .bind(&chat_id)
-    .bind(&payload.briefing_id)
-    .bind(&payload.message)
-    .bind(&ai_response)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "Failed to save chat history (non-fatal)");
-    });
+    use futures_util::StreamExt;
+    
+    let pool_clone = state.pool.clone();
+    let briefing_id = payload.briefing_id.clone();
+    let user_message = payload.message.clone();
 
-    Ok(Json(ChatResponse {
-        response: ai_response,
-        briefing_id: payload.briefing_id,
-    }))
+    let raw_stream = Box::pin(raw_stream);
+
+    let s = futures_util::stream::unfold(
+        (raw_stream, String::new(), false, pool_clone, briefing_id, user_message),
+        move |(mut stream, mut full_response, mut done, pool, briefing_id, user_message)| async move {
+            if done {
+                return None;
+            }
+            match stream.next().await {
+                Some(Ok(text)) => {
+                    full_response.push_str(&text);
+                    let bytes = axum::body::Bytes::from(text);
+                    Some((Ok::<_, std::io::Error>(bytes), (stream, full_response, done, pool, briefing_id, user_message)))
+                }
+                Some(Err(e)) => {
+                    done = true;
+                    let err = std::io::Error::new(std::io::ErrorKind::Other, e);
+                    Some((Err(err), (stream, full_response, done, pool, briefing_id, user_message)))
+                }
+                None => {
+                    // Spawn background task to save to DB
+                    let full_resp_clone = full_response.clone();
+                    tokio::spawn(async move {
+                        let chat_id = Uuid::new_v4().to_string();
+                        let _ = sqlx::query(
+                            r#"INSERT INTO chat_history (id, briefing_id, user_message, ai_response)
+                               VALUES (?, ?, ?, ?)"#,
+                        )
+                        .bind(&chat_id)
+                        .bind(&briefing_id)
+                        .bind(&user_message)
+                        .bind(&full_resp_clone)
+                        .execute(&pool)
+                        .await;
+                    });
+                    None
+                }
+            }
+        }
+    );
+
+    let body = axum::body::Body::from_stream(s);
+    
+    let response = axum::response::Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(body)
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to build stream response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to build stream response".to_string(),
+                }),
+            )
+        })?;
+
+    Ok(response)
 }
 
 /// POST /api/search
@@ -855,6 +896,7 @@ struct RawArticleRow {
     raw_language: String,
     market: String,
     created_at: String,
+    pipeline_status: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
