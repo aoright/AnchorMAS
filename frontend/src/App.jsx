@@ -3,12 +3,14 @@ import './index.css'
 import RawDataView from './components/RawDataView'
 import PipelineView from './components/PipelineView'
 import BriefingView from './components/BriefingView'
+import EvidenceTrackerView from './components/EvidenceTrackerView'
 import AgentEvolutionCenter from './components/AgentEvolutionCenter'
 
 const TABS = [
   { id: 'raw', label: 'Raw Data' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'briefing', label: 'Briefing' },
+  { id: 'tracker', label: 'Evidence Tracker' },
   { id: 'evolution', label: 'Agent Evolution' },
 ]
 
@@ -118,6 +120,7 @@ export default function App() {
         )}
         {activeTab === 'pipeline' && <PipelineView />}
         {activeTab === 'briefing' && <BriefingView />}
+        {activeTab === 'tracker' && <EvidenceTrackerView />}
         {activeTab === 'evolution' && <AgentEvolutionCenter />}
       </main>
 

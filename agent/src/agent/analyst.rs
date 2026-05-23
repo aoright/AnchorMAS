@@ -350,20 +350,143 @@ fn extract_json_array(text: &str) -> String {
     text.to_string()
 }
 
+fn extract_json_object(text: &str) -> String {
+    if let Some(start) = text.find('{') {
+        if let Some(end) = text.rfind('}') {
+            return text[start..=end].to_string();
+        }
+    }
+    text.to_string()
+}
+
+pub async fn ensure_analyst_exists(
+    client: &DoubaoClient,
+    pool: &sqlx::SqlitePool,
+    category: &str,
+) -> Result<(String, String)> {
+    let role_id = match category {
+        "Competition" => "analyst_competition".to_string(),
+        "Product" => "analyst_product".to_string(),
+        "Platform" => "analyst_platform".to_string(),
+        "Regulation" => "analyst_regulation".to_string(),
+        "Social" => "analyst_social".to_string(),
+        _ => {
+            // It is a custom category, e.g., MacroEconomy
+            format!("analyst_{}", category.to_lowercase())
+        }
+    };
+
+    // Check if it already exists in the playbook
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT name, system_prompt FROM agent_playbook WHERE role_id = ?"
+    )
+    .bind(&role_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_default();
+
+    if let Some((name, _system_prompt)) = row {
+        return Ok((role_id, name));
+    }
+
+    // It is a custom category and it doesn't exist, we must design it!
+    tracing::info!("Designing a new analyst agent for custom category: {}", category);
+
+    // Load designer prompt from database
+    let designer_prompt = super::get_agent_prompt(pool, "designer", 
+         r#"你是一个高级智能体架构师与特工设计大师（角色：【Meta-Agent Designer】）。
+你的任务是根据系统检测到的全新珠宝细分分析领域，为该领域定制设计一个专业的【分析特工（Analyst Agent）】。
+
+设计准则：
+1. 分析特工的主要职责是评估该领域内的新闻事件对珠宝企业的商业决策价值（包括判断影响类型：Opportunity/Risk/Attention，打出严重度、紧急度与置信度分数 1-5 分，并给出专业深度分析）。
+2. 在系统提示词中，融入该细分珠宝领域的商业逻辑与专业分析维度（例如若领域为“Auction”，提示词应强调苏富比/佳士得拍卖成交价、彩钻投资级估值、古董珠宝流转及收藏家情绪）。
+3. 必须继承统一的打分规则（Opportunity/Risk/Attention 以及 1-5 评分定义）。
+
+请直接以 JSON 格式输出设计成果，无需任何 Markdown 外壳或解释：
+{
+  "name": "特工名称（如：收藏与拍卖分析特工）",
+  "system_prompt": "设计的完整系统提示词文本"
+}"#).await;
+
+    let user_prompt = format!(
+        "请为新检测到的珠宝细分分析领域：【{}】设计一个专属的分析特工。请在 system_prompt 中包含针对这个领域特有视角的业务关注重点及商业逻辑，并融入标准的Opportunity/Risk/Attention以及1-5分量化打分逻辑。",
+        category
+    );
+
+    let response = client.chat(&designer_prompt, &user_prompt, true).await?;
+    let json_str = extract_json_object(&response);
+    
+    // Parse the designer response
+    let design_val: serde_json::Value = serde_json::from_str(&json_str)
+        .context("Failed to parse designer output as JSON")?;
+        
+    let name = design_val.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&format!("{}分析特工", category))
+        .to_string();
+        
+    let system_prompt = design_val.get("system_prompt")
+        .and_then(|v| v.as_str())
+        .context("Designer output missing system_prompt field")?
+        .to_string();
+
+    // Validate designed prompt
+    let mut designer_complaints = Vec::new();
+    if !system_prompt.contains("Opportunity") && !system_prompt.contains("Opportunity（") {
+        designer_complaints.push("设计的系统提示词中缺少对影响类型 (Opportunity/Risk/Attention) 的明确分类标准。");
+    }
+    if !system_prompt.contains("1-5") {
+        designer_complaints.push("设计的系统提示词中缺少对严重度(severity)、紧急度(urgency)或置信度(confidence)的1-5分量化评分标准。");
+    }
+    if system_prompt.len() < 250 {
+        designer_complaints.push("系统提示词内容过短，缺少该细分领域的专业深度分析视角。");
+    }
+    if !system_prompt.contains("JSON") {
+        designer_complaints.push("提示词中应明确限制输出格式为 JSON 格式数组。");
+    }
+
+    if !designer_complaints.is_empty() {
+        let feedback_msg = format!(
+            "在为细分领域【{}】设计特工提示词时，监督机制发现设计不完善：{} 请重新梳理设计指南，确保输出特工提示词具备完备的分类分级标准与专业度。",
+            category,
+            designer_complaints.join(" ")
+        );
+        super::blackboard::log_feedback(
+            pool,
+            "validator",
+            "designer",
+            None,
+            &feedback_msg
+        ).await;
+        tracing::warn!("Designer output validation failed. Logged feedback to designer role.");
+    }
+
+    // Persist to agent_playbook
+    sqlx::query(
+        r#"INSERT INTO agent_playbook (role_id, name, system_prompt, guidelines, version)
+           VALUES (?, ?, ?, '', 1)
+           ON CONFLICT(role_id) DO UPDATE SET name = excluded.name, system_prompt = excluded.system_prompt"#
+    )
+    .bind(&role_id)
+    .bind(&name)
+    .bind(&system_prompt)
+    .execute(pool)
+    .await
+    .context("Failed to insert custom designed agent into playbook")?;
+
+    tracing::info!("Successfully created and registered new custom agent: {} ({})", name, role_id);
+    
+    Ok((role_id, name))
+}
+
 pub async fn analyze_single_event(
     client: &DoubaoClient,
     pool: &sqlx::SqlitePool,
     event: &FilteredEvent,
 ) -> Result<AnalyzedEvent> {
-    let role_id = match event.category.as_str() {
-        "Competition" => "analyst_competition",
-        "Product" => "analyst_product",
-        "Platform" => "analyst_platform",
-        "Regulation" => "analyst_regulation",
-        _ => "analyst_social",
-    };
+    let (role_id, _name) = ensure_analyst_exists(client, pool, &event.category).await?;
     let default_prompt = get_analyst_prompt(&event.category);
-    let system_prompt = super::get_agent_prompt(pool, role_id, &default_prompt).await;
+    let system_prompt = super::get_agent_prompt(pool, &role_id, &default_prompt).await;
 
     let events_json = vec![serde_json::json!({
         "id": event.id,

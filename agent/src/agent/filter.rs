@@ -162,15 +162,17 @@ pub async fn filter_batch(
 
 对于每篇文章，请：
 1. 判断是否与珠宝行业相关（过滤掉纯广告、无关内容）
-2. 分类到以下类别之一：Competition（竞争动态）, Product（产品趋势）, Social（社会舆情）, Platform（平台渠道）, Regulation（法规政策）
+2. 进行领域分类：
+   - 经典类别：Competition（竞争动态）, Product（产品趋势）, Social（社会舆情）, Platform（平台渠道）, Regulation（法规政策）
+   - 专业精细细分领域：若该事件属于经典五类之外的其他高度专精细分领域（如：宏观经济 MacroEconomy, 绿色可持续 ESG, 奢侈品并购 MergerAcquisition, 独立设计与IP联名 DesignIP, 拍卖会与收藏 Auction, 工艺技术与数字化 TechCraft 等），可以输出自定义的驼峰命名英文类别名（仅限单个单词或以拼音/英文组成的驼峰命名，限制在20字符以内，禁止使用中文类别名）。
 3. 判定关联市场：China, Japan, Korea, SoutheastAsia, UnitedStates, 或 Global
-4. 提取核心摘要。如果原始文章是英文、日文、韩文等外语，必须在 JSON 返回中把 "title" 和 "summary" 翻译为中文输出，确保整份简报语言的一致性。
+4. 提取核心摘要。如果原始文章是外语，必须在 JSON 返回中把 "title" 和 "summary" 翻译为中文输出，确保整份简报语言的一致性。
 
 请以JSON数组格式返回结果，每个元素包含：
 {
   "title": "中文事件标题（外语请翻译为中文）",
   "summary": "50字以内中文摘要（外语请翻译为中文）",
-  "category": "Competition|Product|Social|Platform|Regulation",
+  "category": "Competition|Product|Social|Platform|Regulation|或者自定义驼峰英文类别",
   "market": "China|Japan|Korea|SoutheastAsia|UnitedStates|Global",
   "source_url": "来源URL"
 }

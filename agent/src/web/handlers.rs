@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Query, State, Path},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -48,6 +48,13 @@ struct BriefingResponse {
     created_at: String,
 }
 
+#[derive(Serialize, Clone)]
+struct RawSourceResponse {
+    title: String,
+    source_url: String,
+    content: String,
+}
+
 #[derive(Serialize)]
 struct EventResponse {
     id: String,
@@ -60,6 +67,9 @@ struct EventResponse {
     urgency: i64,
     confidence: i64,
     source_urls: serde_json::Value,
+    analysis: String,
+    #[serde(default)]
+    raw_sources: Vec<RawSourceResponse>,
 }
 
 #[derive(Deserialize)]
@@ -185,7 +195,7 @@ pub async fn get_latest_briefing(
     };
 
     let event_rows = sqlx::query_as::<_, EventRow>(
-        r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls
+        r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
            FROM events
            WHERE briefing_id = ?
            ORDER BY severity DESC, urgency DESC"#,
@@ -203,19 +213,74 @@ pub async fn get_latest_briefing(
         )
     })?;
 
+    // Extract unique source URLs from all event rows to fetch raw articles
+    let mut unique_urls = std::collections::HashSet::new();
+    for row in &event_rows {
+        if let Ok(urls) = serde_json::from_str::<Vec<String>>(&row.source_urls) {
+            for url in urls {
+                unique_urls.insert(url);
+            }
+        }
+    }
+
+    let mut raw_articles_map = std::collections::HashMap::new();
+    if !unique_urls.is_empty() {
+        let urls_vec: Vec<String> = unique_urls.into_iter().collect();
+        for chunk in urls_vec.chunks(500) {
+            let mut query_builder = sqlx::QueryBuilder::new(
+                "SELECT source_url, title, content FROM raw_articles WHERE source_url IN ("
+            );
+            let mut separated = query_builder.separated(", ");
+            for url in chunk {
+                separated.push_bind(url);
+            }
+            separated.push_unseparated(")");
+
+            let query = query_builder.build_query_as::<(String, String, String)>();
+            if let Ok(rows) = query.fetch_all(&state.pool).await {
+                for (source_url, title, content) in rows {
+                    raw_articles_map.insert(
+                        source_url.clone(),
+                        RawSourceResponse {
+                            title,
+                            source_url,
+                            content,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     let events: Vec<EventResponse> = event_rows
         .into_iter()
-        .map(|row| EventResponse {
-            id: row.id,
-            market: row.market,
-            category: row.category,
-            title: row.title,
-            summary: row.summary,
-            impact_type: row.impact_type,
-            severity: row.severity,
-            urgency: row.urgency,
-            confidence: row.confidence,
-            source_urls: serde_json::from_str(&row.source_urls).unwrap_or(serde_json::json!([])),
+        .map(|row| {
+            let urls_val = serde_json::from_str(&row.source_urls).unwrap_or(serde_json::json!([]));
+            let mut raw_sources = Vec::new();
+            if let Some(urls_arr) = urls_val.as_array() {
+                for url_val in urls_arr {
+                    if let Some(url_str) = url_val.as_str() {
+                        if let Some(raw_src) = raw_articles_map.get(url_str) {
+                            raw_sources.push(raw_src.clone());
+                        }
+                    }
+                }
+            }
+
+            EventResponse {
+                id: row.id,
+                market: row.market,
+                category: row.category,
+                title: row.title,
+                summary: row.summary,
+                impact_type: row.impact_type,
+                severity: row.severity,
+                urgency: row.urgency,
+                confidence: row.confidence,
+                source_urls: urls_val,
+                analysis: row.analysis,
+                raw_sources,
+            }
         })
         .collect();
 
@@ -496,7 +561,7 @@ pub async fn chat(
     Json(payload): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let event_rows = sqlx::query_as::<_, EventRow>(
-        r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls
+        r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
            FROM events
            WHERE briefing_id = ?"#,
     )
@@ -780,6 +845,7 @@ struct EventRow {
     urgency: i64,
     confidence: i64,
     source_urls: String,
+    analysis: String,
 }
 
 #[derive(sqlx::FromRow, Default)]
@@ -893,10 +959,18 @@ pub async fn trigger_evolution(
         let client = DoubaoClient::new(&config.ark_api_key, &config.ark_endpoint_id, &config.llm_api_url);
         match crate::agent::evolution::evolve_agents(&pool, &client).await {
             Ok(summary) => {
-                tracing::info!("Manual agent evolution complete: {}", summary);
+                tracing::info!("Manual agent evolution (critiques) complete: {}", summary);
             }
             Err(e) => {
-                tracing::error!("Manual agent evolution failed: {}", e);
+                tracing::error!("Manual agent evolution (critiques) failed: {}", e);
+            }
+        }
+        match crate::agent::evolution::evolve_from_feedback_log(&pool, &client).await {
+            Ok(updates) => {
+                tracing::info!("Manual agent evolution (feedback logs) complete: evolved {} roles", updates.len());
+            }
+            Err(e) => {
+                tracing::error!("Manual agent evolution (feedback logs) failed: {}", e);
             }
         }
     });
@@ -906,4 +980,422 @@ pub async fn trigger_evolution(
         message: "Agent evolution triggered in background".to_string(),
     })
 }
+
+// ---- Bookmark & Evidence Chain Handlers -------------------------------------
+
+#[derive(Deserialize)]
+pub struct CreateBookmarkRequest {
+    pub event_id: String,
+}
+
+#[derive(Serialize)]
+pub struct BookmarkResponse {
+    pub id: String,
+    pub event_id: String,
+    pub title: String,
+    pub summary: String,
+    pub keywords: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct EvidenceChainResponse {
+    pub bookmark: BookmarkResponse,
+    pub chain: Vec<EvidenceChainItem>,
+}
+
+#[derive(Serialize)]
+pub struct EvidenceChainItem {
+    pub event_id: String,
+    pub title: String,
+    pub summary: String,
+    pub date: String,
+    pub direction: String, // "past" | "current" | "future"
+    pub match_score: f64,
+    pub relation_description: String,
+}
+
+/// POST /api/bookmarks
+pub async fn post_bookmark(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateBookmarkRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // 1. Check if event exists
+    let event = sqlx::query!(
+        "SELECT title, summary, analysis FROM events WHERE id = ?",
+        payload.event_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query event: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: "Event not found".to_string() }),
+        )
+    })?;
+
+    // 2. Check if already bookmarked
+    let existing = sqlx::query!(
+        r#"SELECT b.id, b.event_id, e.title, e.summary, b.keywords, b.created_at
+           FROM bookmarks b
+           JOIN events e ON b.event_id = e.id
+           WHERE b.event_id = ?"#,
+        payload.event_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check existing bookmark: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?;
+
+    if let Some(row) = existing {
+        let keywords: Vec<String> = serde_json::from_str(&row.keywords).unwrap_or_default();
+        return Ok((
+            StatusCode::OK,
+            Json(BookmarkResponse {
+                id: row.id.unwrap_or_default(),
+                event_id: row.event_id,
+                title: row.title,
+                summary: row.summary,
+                keywords,
+                created_at: row.created_at,
+            }),
+        ));
+    }
+
+    // 3. Extract evidence profile keywords using LLM
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+    let keywords = agent::tracker::extract_evidence_profile(&doubao, &event.title, &event.summary, &event.analysis)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to extract evidence profile: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("LLM keyword extraction failed: {}", e) }),
+            )
+        })?;
+
+    let keywords_json = serde_json::to_string(&keywords).unwrap_or_default();
+    let bookmark_id = Uuid::new_v4().to_string();
+
+    // 4. Save bookmark to SQLite
+    sqlx::query!(
+        "INSERT INTO bookmarks (id, event_id, keywords) VALUES (?, ?, ?)",
+        bookmark_id,
+        payload.event_id,
+        keywords_json
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to save bookmark: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?;
+
+    // 5. Trigger retrospective tracing in background or sync?
+    // Since it takes a bit of time (LLM calls for matches), we can run it asynchronously but let's wait a bit or spawn it.
+    // Spawning it is better so the user gets a fast response.
+    let pool_clone = state.pool.clone();
+    let qdrant_clone = state.qdrant.clone();
+    let config_clone = state.config.clone();
+    let bookmark_id_clone = bookmark_id.clone();
+    let event_id_clone = payload.event_id.clone();
+
+    tokio::spawn(async move {
+        let doubao = DoubaoClient::new(&config_clone.ark_api_key, &config_clone.ark_endpoint_id, &config_clone.llm_api_url);
+        if let Err(e) = agent::tracker::run_retrospective_tracing(
+            &doubao,
+            &pool_clone,
+            qdrant_clone.as_deref(),
+            &bookmark_id_clone,
+            &event_id_clone,
+            &config_clone,
+        )
+        .await
+        {
+            tracing::error!("Background retrospective tracing failed for bookmark {}: {}", bookmark_id_clone, e);
+        }
+    });
+
+    // 6. Fetch newly created bookmark row to return
+    let created_row = sqlx::query!(
+        r#"SELECT b.id, b.event_id, e.title, e.summary, b.created_at
+           FROM bookmarks b
+           JOIN events e ON b.event_id = e.id
+           WHERE b.id = ?"#,
+        bookmark_id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query created bookmark: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(BookmarkResponse {
+            id: created_row.id.unwrap_or_default(),
+            event_id: created_row.event_id,
+            title: created_row.title,
+            summary: created_row.summary,
+            keywords,
+            created_at: created_row.created_at,
+        }),
+    ))
+}
+
+/// GET /api/bookmarks
+pub async fn get_bookmarks(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let rows = sqlx::query!(
+        r#"SELECT b.id, b.event_id, e.title, e.summary, b.keywords, b.created_at
+           FROM bookmarks b
+           JOIN events e ON b.event_id = e.id
+           ORDER BY b.created_at DESC"#
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query bookmarks: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?;
+
+    let bookmarks: Vec<BookmarkResponse> = rows
+        .into_iter()
+        .map(|row| {
+            let keywords: Vec<String> = serde_json::from_str(&row.keywords).unwrap_or_default();
+            BookmarkResponse {
+                id: row.id.unwrap_or_default(),
+                event_id: row.event_id,
+                title: row.title,
+                summary: row.summary,
+                keywords,
+                created_at: row.created_at,
+            }
+        })
+        .collect();
+
+    Ok(Json(bookmarks))
+}
+
+/// DELETE /api/bookmarks/:id
+pub async fn delete_bookmark(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let result = sqlx::query!("DELETE FROM bookmarks WHERE id = ?", id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete bookmark: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: "Database error".to_string() }),
+            )
+        })?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: "Bookmark not found".to_string() }),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/bookmarks/:id/evidence-chain
+pub async fn get_evidence_chain(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // 1. Fetch bookmark
+    let bookmark_row = sqlx::query!(
+        r#"SELECT b.id, b.event_id, e.title, e.summary, e.created_at as event_created_at, b.keywords, b.created_at as bookmark_created_at
+           FROM bookmarks b
+           JOIN events e ON b.event_id = e.id
+           WHERE b.id = ?"#,
+        id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query bookmark: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: "Bookmark not found".to_string() }),
+        )
+    })?;
+
+    let keywords: Vec<String> = serde_json::from_str(&bookmark_row.keywords).unwrap_or_default();
+    let bookmark = BookmarkResponse {
+        id: bookmark_row.id.unwrap_or_default(),
+        event_id: bookmark_row.event_id.clone(),
+        title: bookmark_row.title.clone(),
+        summary: bookmark_row.summary.clone(),
+        keywords,
+        created_at: bookmark_row.bookmark_created_at,
+    };
+
+    // 2. Fetch matched events in the chain
+    let matched_rows = sqlx::query!(
+        r#"SELECT c.matched_event_id, e.title, e.summary, e.created_at, c.direction, c.match_score, c.match_reason
+           FROM bookmark_evidence_chain c
+           JOIN events e ON c.matched_event_id = e.id
+           WHERE c.bookmark_id = ?"#,
+        id
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query evidence chain: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "Database error".to_string() }),
+        )
+    })?;
+
+    // 3. Construct chronological chain with consolidation of duplicates by title
+    use std::collections::HashMap;
+
+    struct MergeHelper {
+        item: EvidenceChainItem,
+        reasons: Vec<String>,
+    }
+
+    let mut consolidated: HashMap<String, MergeHelper> = HashMap::new();
+
+    // Helper closure to insert/merge an item
+    let mut merge_item = |item: EvidenceChainItem| {
+        // Normalize title by trimming and lowercasing for robust grouping
+        let norm_title = item.title.trim().to_lowercase();
+        let reason = item.relation_description.trim().to_string();
+
+        if let Some(existing) = consolidated.get_mut(&norm_title) {
+            // Merge logic:
+            // 1. If the new item is "current", it overrides the metadata
+            if item.direction == "current" {
+                existing.item.event_id = item.event_id;
+                existing.item.summary = item.summary;
+                existing.item.date = item.date;
+                existing.item.direction = item.direction;
+                existing.item.match_score = item.match_score;
+            } else if existing.item.direction != "current" && item.match_score > existing.item.match_score {
+                // Otherwise, keep the one with the higher match score for representation
+                existing.item.event_id = item.event_id;
+                existing.item.summary = item.summary;
+                existing.item.date = item.date;
+                existing.item.direction = item.direction;
+                existing.item.match_score = item.match_score;
+            }
+
+            // Append relation description if not already present
+            if !reason.is_empty() && !existing.reasons.contains(&reason) {
+                if reason == "当前关注新闻事件" {
+                    existing.reasons.insert(0, reason);
+                } else {
+                    existing.reasons.push(reason);
+                }
+            }
+        } else {
+            let reasons = if reason.is_empty() {
+                vec![]
+            } else {
+                vec![reason]
+            };
+            consolidated.insert(norm_title, MergeHelper {
+                item,
+                reasons,
+            });
+        }
+    };
+
+    // Add matched items
+    for row in matched_rows {
+        merge_item(EvidenceChainItem {
+            event_id: row.matched_event_id,
+            title: row.title,
+            summary: row.summary,
+            date: row.created_at,
+            direction: row.direction,
+            match_score: row.match_score,
+            relation_description: row.match_reason,
+        });
+    }
+
+    // Add the current bookmarked event itself
+    merge_item(EvidenceChainItem {
+        event_id: bookmark_row.event_id.clone(),
+        title: bookmark_row.title.clone(),
+        summary: bookmark_row.summary.clone(),
+        date: bookmark_row.event_created_at.clone(),
+        direction: "current".to_string(),
+        match_score: 1.0,
+        relation_description: "当前关注新闻事件".to_string(),
+    });
+
+    // Extract consolidated items and finalize their relation descriptions
+    let mut chain: Vec<EvidenceChainItem> = consolidated
+        .into_iter()
+        .map(|(_, mut helper)| {
+            helper.reasons.retain(|r| !r.is_empty());
+            helper.reasons.dedup();
+
+            let relation_description = if helper.reasons.is_empty() {
+                String::new()
+            } else if helper.reasons.len() == 1 {
+                helper.reasons[0].clone()
+            } else {
+                if helper.item.direction == "current" {
+                    let mut other_reasons = helper.reasons.clone();
+                    other_reasons.retain(|r| r != "当前关注新闻事件");
+                    if other_reasons.is_empty() {
+                        "当前关注新闻事件".to_string()
+                    } else {
+                        format!("当前关注新闻事件\n关联分析：\n{}", other_reasons.iter().map(|r| format!("• {}", r)).collect::<Vec<_>>().join("\n"))
+                    }
+                } else {
+                    helper.reasons.iter().map(|r| format!("• {}", r)).collect::<Vec<_>>().join("\n")
+                }
+            };
+
+            helper.item.relation_description = relation_description;
+            helper.item
+        })
+        .collect();
+
+    // Sort chronologically by date/created_at
+    chain.sort_by(|a, b| a.date.cmp(&b.date));
+
+    Ok(Json(EvidenceChainResponse { bookmark, chain }))
+}
+
 

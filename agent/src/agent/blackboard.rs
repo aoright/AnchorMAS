@@ -71,15 +71,16 @@ impl Blackboard {
 // ─── Agent Task Runners ──────────────────────────────────────────────────────
 
 /// Gatekeeper Agent Task:
-/// Listens for RawArticleAdded, buffers them, runs filter_batch, and emits FilteredEventAdded.
+/// Listens for RawArticleAdded, buffers them, runs filter_batch concurrently, and emits FilteredEventAdded.
 pub async fn start_gatekeeper(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
     config: Arc<Config>,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     let mut buffer = Vec::new();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
 
     loop {
         let sleep_fut = sleep(Duration::from_millis(500));
@@ -92,13 +93,29 @@ pub async fn start_gatekeeper(
                         buffer.push(doc);
                         if buffer.len() >= 10 {
                             let batch = std::mem::take(&mut buffer);
-                            process_gatekeeper_batch(&blackboard, &client, &pool, &config, batch).await;
+                            let blackboard_clone = blackboard.clone();
+                            let client_clone = client.clone();
+                            let pool_clone = pool.clone();
+                            let config_clone = config.clone();
+                            let sem_clone = semaphore.clone();
+                            tokio::spawn(async move {
+                                let _permit = sem_clone.acquire_owned().await.unwrap();
+                                process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
+                            });
                         }
                     }
                     Ok(AgentMessage::AllScoutingDone) => {
                         if !buffer.is_empty() {
                             let batch = std::mem::take(&mut buffer);
-                            process_gatekeeper_batch(&blackboard, &client, &pool, &config, batch).await;
+                            let blackboard_clone = blackboard.clone();
+                            let client_clone = client.clone();
+                            let pool_clone = pool.clone();
+                            let config_clone = config.clone();
+                            let sem_clone = semaphore.clone();
+                            tokio::spawn(async move {
+                                let _permit = sem_clone.acquire_owned().await.unwrap();
+                                process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
+                            });
                         }
                         break;
                     }
@@ -113,16 +130,19 @@ pub async fn start_gatekeeper(
             }
             _ = &mut sleep_fut, if !buffer.is_empty() => {
                 let batch = std::mem::take(&mut buffer);
-                process_gatekeeper_batch(&blackboard, &client, &pool, &config, batch).await;
+                let blackboard_clone = blackboard.clone();
+                let client_clone = client.clone();
+                let pool_clone = pool.clone();
+                let config_clone = config.clone();
+                let sem_clone = semaphore.clone();
+                tokio::spawn(async move {
+                    let _permit = sem_clone.acquire_owned().await.unwrap();
+                    process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
+                });
             }
         }
     }
-
-    // Flush any remaining
-    if !buffer.is_empty() {
-        process_gatekeeper_batch(&blackboard, &client, &pool, &config, buffer).await;
-    }
-    tracing::info!("Gatekeeper task shut down");
+    tracing::info!("Gatekeeper task finished scheduling all batches");
 }
 
 async fn process_gatekeeper_batch(
@@ -133,8 +153,10 @@ async fn process_gatekeeper_batch(
     batch: Vec<RawDocument>,
 ) {
     let batch_len = batch.len();
+    tracing::info!("Gatekeeper filtering batch of {} raw documents", batch_len);
     match filter::filter_batch(client, pool, &batch).await {
         Ok(events) => {
+            tracing::info!("Gatekeeper filtered batch of {}: found {} events", batch_len, events.len());
             // Decrement work count for the raw documents resolved
             for _ in 0..batch_len {
                 blackboard.decrement_work();
@@ -148,7 +170,7 @@ async fn process_gatekeeper_batch(
             }
         }
         Err(e) => {
-            tracing::error!("Gatekeeper failed to filter batch: {}", e);
+            tracing::error!("Gatekeeper failed to filter batch of {}: {}", batch_len, e);
             for _ in 0..batch_len {
                 blackboard.decrement_work();
             }
@@ -161,11 +183,11 @@ async fn process_gatekeeper_batch(
 /// and either merges them (ConsensusReached) or emits AnalysisReady for unique events.
 pub async fn start_deduplicator(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     pool: sqlx::SqlitePool,
     qdrant: Option<qdrant_client::Qdrant>,
     config: Arc<Config>,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     loop {
         match rx.recv().await {
             Ok(AgentMessage::FilteredEventAdded(event)) => {
@@ -235,10 +257,10 @@ pub async fn start_deduplicator(
 /// Listens for AnalysisReady, dispatches specialized analysis concurrently.
 pub async fn start_analyst_coordinator(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     loop {
         match rx.recv().await {
             Ok(AgentMessage::AnalysisReady(event)) => {
@@ -283,10 +305,10 @@ pub async fn start_analyst_coordinator(
 /// Listens for AnalysisCompleted, runs cross-domain review, and emits PeerReviewCompleted.
 pub async fn start_peer_reviewer(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     loop {
         match rx.recv().await {
             Ok(AgentMessage::AnalysisCompleted(event)) => {
@@ -331,10 +353,10 @@ pub async fn start_peer_reviewer(
 /// Listens for PeerReviewCompleted and RefinementCompleted. Runs fact checks, adjust confidence, and decides approved/rejected.
 pub async fn start_critic(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     loop {
         match rx.recv().await {
             Ok(AgentMessage::PeerReviewCompleted { event, peer_reviewer: _, peer_comments }) => {
@@ -354,6 +376,20 @@ pub async fn start_critic(
                                 blackboard_clone.decrement_work();
                             } else {
                                 tracing::info!(event_id = %event.id, critique = %critique_notes, "Critic rejected analysis on pass 1, triggering refinement");
+                                
+                                // Write feedback to the target domain analyst
+                                let target_analyst = format!("analyst_{}", event.category.to_lowercase());
+                                log_feedback(&pool_clone, "critic", &target_analyst, Some(&event.id), &critique_notes).await;
+
+                                // If the document content is empty or contains promotional ad spam, log feedback to filter
+                                if critique_notes.contains("仅") || critique_notes.contains("缺少正文") || critique_notes.contains("广告") || critique_notes.contains("脑补") {
+                                    let filter_feedback = format!(
+                                        "标题：{}。该事件被核查判定为信息极度匮乏或属于广告噪音，过滤特工不应放行。请收紧过滤标准。",
+                                        event.title
+                                    );
+                                    log_feedback(&pool_clone, "critic", "filter", Some(&event.id), &filter_feedback).await;
+                                }
+
                                 let _ = blackboard_clone.tx.send(AgentMessage::VerifierVerdict {
                                     event,
                                     approved: false,
@@ -385,6 +421,12 @@ pub async fn start_critic(
                             if !approved {
                                 tracing::warn!(event_id = %event.id, "Critic still rejected analysis on pass 2, proceeding with warnings");
                                 final_event.analysis = format!("{}\n[核查警告] 再次核查仍未完全通过：{}", final_event.analysis, critique_notes);
+                                
+                                // Critic still rejected analyst's output on pass 2. Log feedback to all roles to improve coordination.
+                                let target_analyst = format!("analyst_{}", event.category.to_lowercase());
+                                log_feedback(&pool_clone, "critic", &target_analyst, Some(&event.id), &format!("二轮核查失败意见: {}", critique_notes)).await;
+                                log_feedback(&pool_clone, "refiner", "critic", Some(&event.id), "修正特工已针对首轮意见进行修改，但监督官在二轮给出了不同的核查要求或标准过于严苛。建议监督官在首轮给出完整且一致的意见。").await;
+                                log_feedback(&pool_clone, "critic", "refiner", Some(&event.id), &format!("修正特工未能在二轮修改中完全解决首轮提出的核查意见。未通过原因为：{}", critique_notes)).await;
                             } else {
                                 tracing::info!(event_id = %event.id, "Critic approved analysis on pass 2");
                             }
@@ -427,10 +469,10 @@ async fn fetch_raw_content(pool: &sqlx::SqlitePool, event: &AnalyzedEvent) -> St
 /// Listens for VerifierVerdict (approved=false), refines the analysis, runs prompt evolution immediately, and emits RefinementCompleted.
 pub async fn start_refiner(
     blackboard: Arc<Blackboard>,
+    mut rx: broadcast::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
-    let mut rx = blackboard.tx.subscribe();
     loop {
         match rx.recv().await {
             Ok(AgentMessage::VerifierVerdict { event, approved: false, critique_notes, confidence_adjustment: _ }) => {
@@ -444,27 +486,19 @@ pub async fn start_refiner(
                         Ok(refined_event) => {
                             tracing::info!(event_id = %event.id, "Refinement complete. Triggering real-time evolution.");
                             
-                            // Real-time Evolution: Run prompt evolution agent on this resolved conflict immediately
-                            match evolution::evolve_single_event(
-                                &pool_clone,
-                                &client_clone,
-                                &event.category,
-                                &event.title,
-                                &event.summary,
-                                &refined_event.analysis,
-                            ).await {
-                                Ok(Some(update)) => {
-                                    tracing::info!(role = %update.target_role_id, "Real-time playbook evolution succeeded!");
-                                    let _ = blackboard_clone.tx.send(AgentMessage::PlaybookUpdated {
-                                        role_id: update.target_role_id,
-                                        new_guidelines: update.new_guidelines,
-                                    });
-                                }
-                                Ok(None) => {
-                                    tracing::info!("Real-time evolution evaluated: no playbook guidelines updates needed");
+                            // Real-time Evolution: Run prompt evolution agent on feedback log immediately
+                            match evolution::evolve_from_feedback_log(&pool_clone, &client_clone).await {
+                                Ok(updates) => {
+                                    for update in updates {
+                                        tracing::info!(role = %update.target_role_id, "Real-time playbook evolution succeeded!");
+                                        let _ = blackboard_clone.tx.send(AgentMessage::PlaybookUpdated {
+                                            role_id: update.target_role_id,
+                                            new_guidelines: update.new_guidelines,
+                                        });
+                                    }
                                 }
                                 Err(e) => {
-                                    tracing::error!("Real-time evolution run failed: {}", e);
+                                    tracing::error!("Real-time playbook evolution run failed: {}", e);
                                 }
                             }
 
@@ -485,4 +519,24 @@ pub async fn start_refiner(
         }
     }
     tracing::info!("Refiner task shut down");
+}
+
+pub async fn log_feedback(
+    pool: &sqlx::SqlitePool,
+    sender: &str,
+    receiver: &str,
+    event_id: Option<&str>,
+    feedback: &str,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let _ = sqlx::query(
+        "INSERT INTO agent_feedback_log (id, sender, receiver, event_id, feedback) VALUES (?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(sender)
+    .bind(receiver)
+    .bind(event_id)
+    .bind(feedback)
+    .execute(pool)
+    .await;
 }

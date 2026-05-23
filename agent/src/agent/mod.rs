@@ -5,6 +5,7 @@ pub mod synthesizer;
 pub mod verifier;
 pub mod evolution;
 pub mod blackboard;
+pub mod tracker;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -59,16 +60,24 @@ pub struct AnalyzedEvent {
     pub analysis: String,
 }
 
+/// Status and notes for a specific market region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStatus {
+    pub status: String,
+    pub notes: String,
+}
+
 /// The final strategic briefing produced by the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategicBriefing {
     pub id: String,
     pub date: String,
     pub overview: String,
-    pub heatmap: HashMap<String, String>,
+    pub heatmap: HashMap<String, MarketStatus>,
     pub events: Vec<AnalyzedEvent>,
     pub recommendations: Vec<String>,
 }
+
 
 /// Pipeline stage currently being executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +184,14 @@ impl DoubaoClient {
     /// Send a chat completion request.
     /// Returns the assistant's reply content. Enforces JSON mode if json_mode is true.
     pub async fn chat(&self, system_prompt: &str, user_prompt: &str, json_mode: bool) -> Result<String> {
+        let mut final_system_prompt = system_prompt.to_string();
+        if json_mode {
+            let lower = final_system_prompt.to_lowercase();
+            if !lower.contains("json") {
+                final_system_prompt.push_str("\n\nPlease output the results in JSON format.");
+            }
+        }
+
         let response_format = if json_mode {
             Some(ResponseFormat {
                 format_type: "json_object".to_string(),
@@ -188,7 +205,7 @@ impl DoubaoClient {
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
-                    content: system_prompt.to_string(),
+                    content: final_system_prompt,
                 },
                 ChatMessage {
                     role: "user".to_string(),
@@ -411,13 +428,21 @@ where
     // Spawn agent task runners in parallel!
     let config_arc = Arc::new(config.clone());
     
+    // Subscribe receivers first to avoid tokio::sync::broadcast race conditions
+    let gatekeeper_rx = blackboard.tx.subscribe();
+    let dedup_rx = blackboard.tx.subscribe();
+    let analyst_rx = blackboard.tx.subscribe();
+    let peer_rx = blackboard.tx.subscribe();
+    let critic_rx = blackboard.tx.subscribe();
+    let refiner_rx = blackboard.tx.subscribe();
+
     // 1. Gatekeeper Task
     let gatekeeper_bb = blackboard.clone();
     let gatekeeper_client = doubao.clone();
     let gatekeeper_pool = pool.clone();
     let gatekeeper_config = config_arc.clone();
     tokio::spawn(async move {
-        blackboard::start_gatekeeper(gatekeeper_bb, gatekeeper_client, gatekeeper_pool, gatekeeper_config).await;
+        blackboard::start_gatekeeper(gatekeeper_bb, gatekeeper_rx, gatekeeper_client, gatekeeper_pool, gatekeeper_config).await;
     });
 
     // 2. De-duplicator Task (Re-enabled with Qdrant client support!)
@@ -426,7 +451,7 @@ where
     let dedup_qdrant = qdrant.cloned();
     let dedup_config = config_arc.clone();
     tokio::spawn(async move {
-        blackboard::start_deduplicator(dedup_bb, dedup_pool, dedup_qdrant, dedup_config).await;
+        blackboard::start_deduplicator(dedup_bb, dedup_rx, dedup_pool, dedup_qdrant, dedup_config).await;
     });
 
     // 3. Analyst Coordinator Task
@@ -434,7 +459,7 @@ where
     let analyst_client = doubao.clone();
     let analyst_pool = pool.clone();
     tokio::spawn(async move {
-        blackboard::start_analyst_coordinator(analyst_bb, analyst_client, analyst_pool).await;
+        blackboard::start_analyst_coordinator(analyst_bb, analyst_rx, analyst_client, analyst_pool).await;
     });
 
     // 4. Peer Reviewer Task
@@ -442,7 +467,7 @@ where
     let peer_client = doubao.clone();
     let peer_pool = pool.clone();
     tokio::spawn(async move {
-        blackboard::start_peer_reviewer(peer_bb, peer_client, peer_pool).await;
+        blackboard::start_peer_reviewer(peer_bb, peer_rx, peer_client, peer_pool).await;
     });
 
     // 5. Critic Task
@@ -450,7 +475,7 @@ where
     let critic_client = doubao.clone();
     let critic_pool = pool.clone();
     tokio::spawn(async move {
-        blackboard::start_critic(critic_bb, critic_client, critic_pool).await;
+        blackboard::start_critic(critic_bb, critic_rx, critic_client, critic_pool).await;
     });
 
     // 6. Refiner (and Real-time Evolution) Task
@@ -458,7 +483,7 @@ where
     let refiner_client = doubao.clone();
     let refiner_pool = pool.clone();
     tokio::spawn(async move {
-        blackboard::start_refiner(refiner_bb, refiner_client, refiner_pool).await;
+        blackboard::start_refiner(refiner_bb, refiner_rx, refiner_client, refiner_pool).await;
     });
 
     // Coordinator & Progress Reporter Loop on main thread
@@ -579,6 +604,11 @@ where
     })
     .await;
 
+    // Run final all-agent feedback evolution pass before synthesizing briefing
+    if let Err(e) = evolution::evolve_from_feedback_log(pool, &doubao).await {
+        tracing::error!("Final all-agent feedback evolution pass failed: {}", e);
+    }
+
     let briefing = if consensus_events.is_empty() {
         StrategicBriefing {
             id: Uuid::new_v4().to_string(),
@@ -592,6 +622,17 @@ where
         synthesizer::synthesize_briefing(&doubao, pool, &consensus_events).await?
     };
 
+    // Audit the synthesized briefing quality
+    if !consensus_events.is_empty() {
+        if let Err(e) = synthesizer::audit_briefing(&doubao, pool, &briefing).await {
+            tracing::error!("Briefing quality audit failed: {}", e);
+        }
+        // Run a post-briefing evolution pass to process any synthesizer or evolution feedback logged at the end
+        if let Err(e) = evolution::evolve_from_feedback_log(pool, &doubao).await {
+            tracing::error!("Post-briefing evolution pass failed: {}", e);
+        }
+    }
+
     // Save briefing to SQLite
     save_briefing(pool, &briefing).await?;
     save_events(pool, &briefing.id, &briefing.events).await?;
@@ -602,6 +643,11 @@ where
         if let Err(e) = crate::vectordb::store_events(qclient, collection, &briefing.events, &briefing.id, config).await {
             tracing::error!(error = %e, "Failed to store events in Qdrant");
         }
+    }
+
+    // Run prospective tracking on newly generated events to match against active bookmarks
+    if let Err(e) = tracker::run_prospective_tracking(&doubao, pool, qdrant, &briefing.events, config).await {
+        tracing::error!(error = %e, "Failed to run prospective tracking on daily briefing events");
     }
 
     progress(PipelineProgress {

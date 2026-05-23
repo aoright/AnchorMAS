@@ -146,6 +146,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/agent/roles", axum::routing::get(handlers::get_agent_roles))
         .route("/api/agent/evolution-history", axum::routing::get(handlers::get_evolution_history))
         .route("/api/agent/evolve", axum::routing::post(handlers::trigger_evolution))
+        .route("/api/bookmarks", axum::routing::post(handlers::post_bookmark).get(handlers::get_bookmarks))
+        .route("/api/bookmarks/:id", axum::routing::delete(handlers::delete_bookmark))
+        .route("/api/bookmarks/:id/evidence-chain", axum::routing::get(handlers::get_evidence_chain))
         .layer(cors)
         .with_state(state)
 }
