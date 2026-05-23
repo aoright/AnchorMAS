@@ -3,11 +3,46 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>战略模拟 Agent · 市场雷达</title>
+  <title>AnchorMAS · Design Workbench</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- 页面留白，等设计 -->
+  <header class="workbench-bar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name">AnchorMAS</span>
+      <span class="brand-sub">Design Workbench</span>
+    </div>
+    <nav class="view-switch" role="tablist" aria-label="预览模式">
+      <button class="view-btn active" data-view="split" role="tab" aria-selected="true">双视图</button>
+      <button class="view-btn" data-view="desktop" role="tab" aria-selected="false">桌面</button>
+      <button class="view-btn" data-view="mobile" role="tab" aria-selected="false">手机</button>
+    </nav>
+  </header>
+
+  <main class="stage" data-view="split">
+    <!-- 手机框 -->
+    <section class="frame frame-mobile" aria-label="手机预览">
+      <div class="frame-label">Mobile · 390 × 844</div>
+      <div class="device device-mobile">
+        <iframe class="preview-iframe" src="mobile/index.html" title="手机预览" loading="eager"></iframe>
+      </div>
+    </section>
+
+    <!-- 桌面框 -->
+    <section class="frame frame-desktop" aria-label="桌面预览">
+      <div class="frame-label">Desktop · iPad &amp; up (≥1024)</div>
+      <div class="device device-desktop">
+        <div class="device-chrome">
+          <span class="dot dot-r"></span>
+          <span class="dot dot-y"></span>
+          <span class="dot dot-g"></span>
+        </div>
+        <iframe class="preview-iframe" src="desktop/index.html" title="桌面预览" loading="eager"></iframe>
+      </div>
+    </section>
+  </main>
+
   <script src="script.js"></script>
 </body>
 </html>

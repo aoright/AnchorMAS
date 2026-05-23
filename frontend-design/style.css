@@ -1,15 +1,185 @@
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* ========== Workbench shell ========== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #f4f5f7;
+  --bar-bg: #ffffff;
+  --line: #e5e7eb;
+  --ink: #111827;
+  --ink-soft: #6b7280;
+  --accent: #4f46e5;
+  --accent-soft: #eef2ff;
+  --shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+  --radius-frame: 14px;
+  --radius-phone: 38px;
+  --bar-h: 56px;
 }
 
 html, body {
   width: 100%;
   height: 100%;
-  background: #ffffff;
-  color: #111;
+  background: var(--bg);
+  color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
+
+/* ---- Top bar ---- */
+.workbench-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--bar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: var(--bar-bg);
+  border-bottom: 1px solid var(--line);
+  z-index: 10;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: linear-gradient(135deg, #6366f1, #ec4899);
+}
+.brand-name { font-weight: 700; letter-spacing: 0.02em; }
+.brand-sub  { color: var(--ink-soft); font-size: 13px; }
+
+/* ---- View switch ---- */
+.view-switch {
+  display: inline-flex;
+  background: #f3f4f6;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+}
+.view-btn {
+  border: 0;
+  background: transparent;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  font-family: inherit;
+}
+.view-btn:hover { color: var(--ink); }
+.view-btn.active {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+
+/* ---- Stage (frames area) ---- */
+.stage {
+  position: fixed;
+  inset: var(--bar-h) 0 0 0;
+  display: flex;
+  gap: 28px;
+  padding: 28px;
+  overflow: auto;
+  align-items: stretch;
+  justify-content: center;
+}
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.frame-label {
+  font-size: 12px;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ---- Device: mobile ---- */
+.frame-mobile { flex: 0 0 auto; }
+.device-mobile {
+  width: 390px;
+  height: 844px;
+  max-height: calc(100vh - var(--bar-h) - 96px);
+  background: #111827;
+  border-radius: var(--radius-phone);
+  padding: 12px;
+  box-shadow: var(--shadow);
+  position: relative;
+}
+.device-mobile .preview-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: calc(var(--radius-phone) - 12px);
+  background: #fff;
+  display: block;
+}
+
+/* ---- Device: desktop ---- */
+.frame-desktop { flex: 1 1 auto; min-width: 0; }
+.device-desktop {
+  width: 100%;
+  min-width: 1024px;
+  height: calc(100vh - var(--bar-h) - 96px);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-frame);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.device-chrome {
+  height: 36px;
+  flex: 0 0 36px;
+  background: #fafafa;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+}
+.dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  display: inline-block;
+}
+.dot-r { background: #ff5f57; }
+.dot-y { background: #febc2e; }
+.dot-g { background: #28c840; }
+
+.device-desktop .preview-iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
+  background: #fff;
+  display: block;
+}
+
+/* ---- View modes ---- */
+.stage[data-view="desktop"] .frame-mobile { display: none; }
+.stage[data-view="desktop"] .frame-desktop { width: 100%; }
+
+.stage[data-view="mobile"] .frame-desktop { display: none; }
+.stage[data-view="mobile"] { justify-content: center; }
+
+.stage[data-view="split"] {
+  /* default — both visible */
+}
+
+/* ---- Scrollbar (subtle) ---- */
+.stage::-webkit-scrollbar { width: 10px; height: 10px; }
+.stage::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 10px;
+}
+.stage::-webkit-scrollbar-track { background: transparent; }

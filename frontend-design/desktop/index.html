@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AnchorMAS · Desktop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=JetBrains+Mono:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../shared/tokens.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <svg class="paper-grain" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <filter id="grain-d">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0"/>
+    </filter>
+    <rect width="100%" height="100%" filter="url(#grain-d)" opacity="0.06"/>
+  </svg>
+
+  <div class="app" data-tab="brief">
+
+    <!-- ==================== Sidebar ==================== -->
+    <aside class="sidebar" aria-label="主导航">
+
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="0.8" stroke-linecap="round">
+            <circle cx="20" cy="20" r="17"/>
+            <circle cx="20" cy="20" r="11"/>
+            <circle cx="20" cy="20" r="5"/>
+            <circle cx="20" cy="20" r="1.4" fill="currentColor" stroke="none"/>
+            <line x1="20" y1="1" x2="20" y2="9"/>
+            <line x1="20" y1="31" x2="20" y2="39"/>
+            <line x1="1" y1="20" x2="9" y2="20"/>
+            <line x1="31" y1="20" x2="39" y2="20"/>
+          </svg>
+        </span>
+        <div class="brand-textblock">
+          <span class="brand-name">AnchorMAS</span>
+          <span class="brand-tag">Market Radar · 海外战情</span>
+        </div>
+      </div>
+
+      <div class="nav-section-label">
+        <span class="rule"></span><span class="rule-text">Sections</span><span class="rule"></span>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item" data-tab="brief">
+          <span class="nav-num">01</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1"/><rect x="7" y="6.5" width="10" height="3" fill="currentColor" stroke="none" opacity="0.85"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="16.5" x2="13" y2="16.5"/></svg></span>
+          <span class="nav-text"><span class="nav-label">简报</span><span class="nav-en">Brief</span></span>
+          <span class="nav-marker"></span>
+        </button>
+
+        <div class="nav-controls" data-controls="brief">
+          <button class="control-btn" type="button" data-role="date-trigger">
+            <span class="control-label">Date</span>
+            <span class="control-row">
+              <span class="control-value" data-bind="date-text">Sat · 23 May 2026</span>
+              <svg class="control-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 3 3-3"/></svg>
+            </span>
+            <input class="date-native" type="date" value="2026-05-23" data-bind="date-input" tabindex="-1" aria-hidden="true">
+          </button>
+
+          <div class="region-picker">
+            <button class="control-btn" type="button" data-role="region-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span class="control-label">Region</span>
+              <span class="control-row">
+                <span class="control-value" data-bind="region-text">全部市场</span>
+                <svg class="control-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 3 3-3"/></svg>
+              </span>
+            </button>
+            <ul class="region-menu" role="listbox" hidden>
+              <li role="option" data-region="all"><span class="opt-cn">全部市场</span><span class="opt-en">All</span></li>
+              <li role="option" data-region="cn"><span class="opt-cn">中国</span><span class="opt-en">CN</span></li>
+              <li role="option" data-region="jp"><span class="opt-cn">日本</span><span class="opt-en">JP</span></li>
+              <li role="option" data-region="kr"><span class="opt-cn">韩国</span><span class="opt-en">KR</span></li>
+              <li role="option" data-region="sea"><span class="opt-cn">东南亚</span><span class="opt-en">SEA</span></li>
+              <li role="option" data-region="us"><span class="opt-cn">美国</span><span class="opt-en">US</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <button class="nav-item" data-tab="chat">
+          <span class="nav-num">02</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8A2.5 2.5 0 0 1 17.5 17H11l-4 3.5V17H6.5A2.5 2.5 0 0 1 4 14.5z"/><circle cx="9" cy="10.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="12" cy="10.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="15" cy="10.5" r="0.9" fill="currentColor" stroke="none"/></svg></span>
+          <span class="nav-text"><span class="nav-label">对话</span><span class="nav-en">Dialogue</span></span>
+          <span class="nav-marker"></span>
+        </button>
+
+        <button class="nav-item" data-tab="market">
+          <span class="nav-num">03</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.6" ry="8.5"/><line x1="3.5" y1="12" x2="20.5" y2="12"/></svg></span>
+          <span class="nav-text"><span class="nav-label">新闻</span><span class="nav-en">News</span></span>
+          <span class="nav-marker"></span>
+        </button>
+
+        <button class="nav-item" data-tab="saved">
+          <span class="nav-num">04</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h11a1 1 0 0 1 1 1V20.7a0.5 0.5 0 0 1-0.78 0.42L12 17.6l-5.72 3.52A0.5 0.5 0 0 1 5.5 20.7V4.5a1 1 0 0 1 1-1z"/></svg></span>
+          <span class="nav-text"><span class="nav-label">收藏</span><span class="nav-en">Filed</span></span>
+          <span class="nav-marker"></span>
+        </button>
+
+        <button class="nav-item" data-tab="settings">
+          <span class="nav-num">05</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"/></svg></span>
+          <span class="nav-text"><span class="nav-label">设置</span><span class="nav-en">Settings</span></span>
+          <span class="nav-marker"></span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <button class="user-card" type="button" aria-label="账户">
+          <span class="avatar" aria-hidden="true">
+            <span class="avatar-initials">JY</span>
+            <span class="avatar-dot"></span>
+          </span>
+          <span class="user-meta">
+            <span class="user-name">Jie Ye</span>
+            <span class="user-role">Cross-border Ops · 跨境运营</span>
+          </span>
+          <span class="user-chev" aria-hidden="true">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l4 4-4 4"/></svg>
+          </span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ==================== Content ==================== -->
+    <main class="content">
+
+      <section class="view" data-view="brief">
+        <article class="brief">
+
+          <header class="brief-head">
+            <h1 class="brief-title">
+              <span class="brief-title-en">Daily Brief</span>
+              <span class="brief-title-cn">今日简报</span>
+            </h1>
+
+            <p class="brief-lead">
+              Five overseas markets registered material movement today.
+              <em>中国、东南亚需立即关注</em>，三起平台 / 法规变动正在重塑跨境运营节奏。
+            </p>
+
+            <div class="climate-strip" aria-label="今日市场温度">
+              <span class="climate-chip" data-level="high"><span class="dot"></span><span class="chip-cn">中国</span><span class="chip-en">CN</span></span>
+              <span class="climate-chip" data-level="watch"><span class="dot"></span><span class="chip-cn">日本</span><span class="chip-en">JP</span></span>
+              <span class="climate-chip" data-level="ok"><span class="dot"></span><span class="chip-cn">韩国</span><span class="chip-en">KR</span></span>
+              <span class="climate-chip" data-level="high"><span class="dot"></span><span class="chip-cn">东南亚</span><span class="chip-en">SEA</span></span>
+              <span class="climate-chip" data-level="ok"><span class="dot"></span><span class="chip-cn">美国</span><span class="chip-en">US</span></span>
+            </div>
+          </header>
+
+          <div class="brief-orn" aria-hidden="true">
+            <span class="rule"></span><span class="orn">◆</span><span class="rule"></span>
+          </div>
+
+          <div class="brief-stories">
+
+            <article class="story" data-level="high" data-region="cn">
+              <div class="story-num">01</div>
+              <div class="story-main">
+                <div class="story-top">
+                  <h2 class="story-market"><span class="market-cn">中国</span><span class="market-en">China · CN</span></h2>
+                  <span class="story-badge">High Risk</span>
+                </div>
+                <div class="story-tags"><span class="tag">Regulation</span><span class="tag">Platform</span></div>
+                <h3 class="story-headline">中国海关跨境电商出口 HS 编码申报抽查规则 6 月起升级</h3>
+                <dl class="story-detail">
+                  <div class="detail-row"><dt>Impact</dt><dd>出口东南亚、中东海外仓的中小品牌可能面临 3–5 日清关延迟。</dd></div>
+                  <div class="detail-row"><dt>Action</dt><dd>复核 SKU 在新规下的归类正确性 ＋ 报关代理资质审查。</dd></div>
+                </dl>
+                <footer class="story-foot">
+                  <ol class="story-sources">
+                    <li><a href="#"><span class="src-num">1</span><span class="src-name">海关总署</span><time>08:12</time></a></li>
+                    <li><a href="#"><span class="src-num">2</span><span class="src-name">雨果跨境</span><time>06:30</time></a></li>
+                  </ol>
+                  <div class="story-actions">
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8a0.7 0.7 0 0 1 0.7 0.7v10.5a0.35 0.35 0 0 1-0.54 0.3L8 11.5l-4.16 2.5a0.35 0.35 0 0 1-0.54-0.3V3.2A0.7 0.7 0 0 1 4 2.5z"/></svg><span>收藏</span></button>
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.3a1.7 1.7 0 0 1 3.4 0c0 1.2-1.7 1.7-1.7 1.7"/><circle cx="8" cy="11.2" r="0.45" fill="currentColor"/></svg><span>追问</span></button>
+                  </div>
+                </footer>
+              </div>
+            </article>
+
+            <article class="story" data-level="watch" data-region="jp">
+              <div class="story-num">02</div>
+              <div class="story-main">
+                <div class="story-top">
+                  <h2 class="story-market"><span class="market-cn">日本</span><span class="market-en">Japan · JP</span></h2>
+                  <span class="story-badge">Watch</span>
+                </div>
+                <div class="story-tags"><span class="tag">Regulation</span><span class="tag">Product</span></div>
+                <h3 class="story-headline">日本消費者庁就 EC 标价表示规范发布修订意见征集</h3>
+                <dl class="story-detail">
+                  <div class="detail-row"><dt>Impact</dt><dd>影响"原价划线 + 折扣"营销表达，6 月底前可提交意见。</dd></div>
+                  <div class="detail-row"><dt>Action</dt><dd>检视乐天 / 雅虎 listing 表达，评估 PR 介入必要性。</dd></div>
+                </dl>
+                <footer class="story-foot">
+                  <ol class="story-sources">
+                    <li><a href="#"><span class="src-num">1</span><span class="src-name">消費者庁</span><time>08:00</time></a></li>
+                    <li><a href="#"><span class="src-num">2</span><span class="src-name">日経新聞</span><time>07:30</time></a></li>
+                  </ol>
+                  <div class="story-actions">
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8a0.7 0.7 0 0 1 0.7 0.7v10.5a0.35 0.35 0 0 1-0.54 0.3L8 11.5l-4.16 2.5a0.35 0.35 0 0 1-0.54-0.3V3.2A0.7 0.7 0 0 1 4 2.5z"/></svg><span>收藏</span></button>
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.3a1.7 1.7 0 0 1 3.4 0c0 1.2-1.7 1.7-1.7 1.7"/><circle cx="8" cy="11.2" r="0.45" fill="currentColor"/></svg><span>追问</span></button>
+                  </div>
+                </footer>
+              </div>
+            </article>
+
+            <article class="story" data-level="ok" data-region="kr">
+              <div class="story-num">03</div>
+              <div class="story-main">
+                <div class="story-top">
+                  <h2 class="story-market"><span class="market-cn">韩国</span><span class="market-en">Korea · KR</span></h2>
+                  <span class="story-badge">Opportunity</span>
+                </div>
+                <div class="story-tags"><span class="tag">Platform</span><span class="tag">Distribution</span></div>
+                <h3 class="story-headline">Olive Young 与 7-Eleven 韩国合作扩张，覆盖 6,000＋ 门店</h3>
+                <dl class="story-detail">
+                  <div class="detail-row"><dt>Impact</dt><dd>韩国本地线下渠道开放新流量入口，K-Beauty 同品类有进入窗口。</dd></div>
+                  <div class="detail-row"><dt>Action</dt><dd>评估韩国仓 SKU 与 OY × 7-Eleven 联合促销可能性。</dd></div>
+                </dl>
+                <footer class="story-foot">
+                  <ol class="story-sources">
+                    <li><a href="#"><span class="src-num">1</span><span class="src-name">매일경제</span><time>07:15</time></a></li>
+                    <li><a href="#"><span class="src-num">2</span><span class="src-name">Olive Young 公告</span><time>06:00</time></a></li>
+                  </ol>
+                  <div class="story-actions">
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8a0.7 0.7 0 0 1 0.7 0.7v10.5a0.35 0.35 0 0 1-0.54 0.3L8 11.5l-4.16 2.5a0.35 0.35 0 0 1-0.54-0.3V3.2A0.7 0.7 0 0 1 4 2.5z"/></svg><span>收藏</span></button>
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.3a1.7 1.7 0 0 1 3.4 0c0 1.2-1.7 1.7-1.7 1.7"/><circle cx="8" cy="11.2" r="0.45" fill="currentColor"/></svg><span>追问</span></button>
+                  </div>
+                </footer>
+              </div>
+            </article>
+
+            <article class="story" data-level="high" data-region="sea">
+              <div class="story-num">04</div>
+              <div class="story-main">
+                <div class="story-top">
+                  <h2 class="story-market"><span class="market-cn">东南亚</span><span class="market-en">Southeast Asia · VN</span></h2>
+                  <span class="story-badge">High Risk</span>
+                </div>
+                <div class="story-tags"><span class="tag">Platform</span><span class="tag">Regulation</span></div>
+                <h3 class="story-headline">TikTok Shop 越南站抽佣由 5% 上调至 8%，6 月起执行</h3>
+                <dl class="story-detail">
+                  <div class="detail-row"><dt>Impact</dt><dd>直接挤压本地化定价空间，中小 SKU 毛利首当其冲。</dd></div>
+                  <div class="detail-row"><dt>Action</dt><dd>复核越南 SKU 定价模型 ＋ 库存批次上架节奏。</dd></div>
+                </dl>
+                <footer class="story-foot">
+                  <ol class="story-sources">
+                    <li><a href="#"><span class="src-num">1</span><span class="src-name">Reuters</span><time>03:42</time></a></li>
+                    <li><a href="#"><span class="src-num">2</span><span class="src-name">VnExpress</span><time>02:18</time></a></li>
+                    <li><a href="#"><span class="src-num">3</span><span class="src-name">平台公告</span><time>01:00</time></a></li>
+                  </ol>
+                  <div class="story-actions">
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8a0.7 0.7 0 0 1 0.7 0.7v10.5a0.35 0.35 0 0 1-0.54 0.3L8 11.5l-4.16 2.5a0.35 0.35 0 0 1-0.54-0.3V3.2A0.7 0.7 0 0 1 4 2.5z"/></svg><span>收藏</span></button>
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.3a1.7 1.7 0 0 1 3.4 0c0 1.2-1.7 1.7-1.7 1.7"/><circle cx="8" cy="11.2" r="0.45" fill="currentColor"/></svg><span>追问</span></button>
+                  </div>
+                </footer>
+              </div>
+            </article>
+
+            <article class="story" data-level="ok" data-region="us">
+              <div class="story-num">05</div>
+              <div class="story-main">
+                <div class="story-top">
+                  <h2 class="story-market"><span class="market-cn">美国</span><span class="market-en">United States · US</span></h2>
+                  <span class="story-badge">Opportunity</span>
+                </div>
+                <div class="story-tags"><span class="tag">Product</span><span class="tag">Competition</span></div>
+                <h3 class="story-headline">Stanley 新色系反响平淡，社媒声量同比下滑 18%</h3>
+                <dl class="story-detail">
+                  <div class="detail-row"><dt>Impact</dt><dd>该品类终端流量出现空档，适合错位上架限定色或胶囊系列。</dd></div>
+                  <div class="detail-row"><dt>Action</dt><dd>评估美国仓 Q3 限定 SKU 节奏，准备 TikTok / Reels 种草排期。</dd></div>
+                </dl>
+                <footer class="story-foot">
+                  <ol class="story-sources">
+                    <li><a href="#"><span class="src-num">1</span><span class="src-name">Brandwatch</span><time>07:00</time></a></li>
+                    <li><a href="#"><span class="src-num">2</span><span class="src-name">TikTok Trends</span><time>05:45</time></a></li>
+                  </ol>
+                  <div class="story-actions">
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8a0.7 0.7 0 0 1 0.7 0.7v10.5a0.35 0.35 0 0 1-0.54 0.3L8 11.5l-4.16 2.5a0.35 0.35 0 0 1-0.54-0.3V3.2A0.7 0.7 0 0 1 4 2.5z"/></svg><span>收藏</span></button>
+                    <button class="story-action" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.3a1.7 1.7 0 0 1 3.4 0c0 1.2-1.7 1.7-1.7 1.7"/><circle cx="8" cy="11.2" r="0.45" fill="currentColor"/></svg><span>追问</span></button>
+                  </div>
+                </footer>
+              </div>
+            </article>
+
+          </div>
+
+          <footer class="brief-foot">
+            <span class="rule"></span>
+            <span class="orn-text">End of Brief · 完</span>
+            <span class="rule"></span>
+          </footer>
+
+        </article>
+      </section>
+
+      <section class="view" data-view="chat"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 对话</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="market"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 新闻</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="saved"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 收藏</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="settings"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 设置</span><span class="ph-rule"></span></div></section>
+
+    </main>
+
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
