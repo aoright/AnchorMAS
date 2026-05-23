@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+
+const HISTORY_PAGE_SIZE = 20
 
 export default function AgentEvolutionCenter() {
   const [roles, setRoles] = useState([])
@@ -6,6 +8,8 @@ export default function AgentEvolutionCenter() {
   const [loading, setLoading] = useState(false)
   const [evolving, setEvolving] = useState(false)
   const [evolveResult, setEvolveResult] = useState(null)
+  const [historyRoleFilter, setHistoryRoleFilter] = useState('all')
+  const [visibleHistoryCount, setVisibleHistoryCount] = useState(HISTORY_PAGE_SIZE)
 
   const fetchData = async () => {
     setLoading(true)
@@ -71,6 +75,34 @@ export default function AgentEvolutionCenter() {
   const getRoleName = (roleId) => {
     const found = roles.find(r => r.role_id === roleId)
     return found ? found.name : roleId
+  }
+
+  const historyRoleOptions = useMemo(() => {
+    const ids = new Set(history.map(log => log.role_id).filter(Boolean))
+    const orderedRoles = roles
+      .filter(role => ids.has(role.role_id))
+      .map(role => ({ role_id: role.role_id, name: role.name }))
+    const orderedIds = new Set(orderedRoles.map(role => role.role_id))
+    const unknownRoles = [...ids]
+      .filter(roleId => !orderedIds.has(roleId))
+      .sort()
+      .map(roleId => ({ role_id: roleId, name: roleId }))
+
+    return [...orderedRoles, ...unknownRoles]
+  }, [history, roles])
+
+  const filteredHistory = useMemo(() => {
+    if (historyRoleFilter === 'all') return history
+    return history.filter(log => log.role_id === historyRoleFilter)
+  }, [history, historyRoleFilter])
+
+  const visibleHistory = useMemo(() => {
+    return filteredHistory.slice(0, visibleHistoryCount)
+  }, [filteredHistory, visibleHistoryCount])
+
+  const handleHistoryFilterChange = (event) => {
+    setHistoryRoleFilter(event.target.value)
+    setVisibleHistoryCount(HISTORY_PAGE_SIZE)
   }
 
   return (
@@ -215,43 +247,80 @@ export default function AgentEvolutionCenter() {
         ) : history.length === 0 ? (
           <div className="empty-state">No evolution cycles recorded yet. Generate briefings with verifier rejects to trigger auto-evolution.</div>
         ) : (
-          <div className="history-timeline">
-            {history.map((log) => (
-              <div key={log.id} className="timeline-item">
-                <div className="timeline-marker" />
-                <div className="timeline-content-card">
-                  <div className="timeline-header">
-                    <div>
-                      <span className={`label ${getRoleColor(log.role_id)}`} style={{ marginRight: 8 }}>
-                        {getRoleName(log.role_id)}
-                      </span>
-                      <span className="timeline-role-id">({log.role_id})</span>
-                    </div>
-                    <span className="timeline-time">
-                      {new Date(log.created_at).toLocaleString()}
-                    </span>
-                  </div>
-                  
-                  <div className="timeline-body">
-                    <div className="timeline-reasoning">
-                      <strong>Evolution Reasoning:</strong> {log.reasoning}
-                    </div>
-                    
-                    <div className="timeline-diff-grid">
-                      <div className="diff-panel diff-old">
-                        <span className="diff-title">Previous Evolved Guidelines</span>
-                        <pre>{log.old_guidelines || '(Empty Guidelines)'}</pre>
+          <>
+            <div className="history-toolbar">
+              <select
+                className="input"
+                value={historyRoleFilter}
+                onChange={handleHistoryFilterChange}
+              >
+                <option value="all">All Agents</option>
+                {historyRoleOptions.map((role) => (
+                  <option key={role.role_id} value={role.role_id}>
+                    {role.name} ({role.role_id})
+                  </option>
+                ))}
+              </select>
+              <span className="history-count">
+                Showing {visibleHistory.length} of {filteredHistory.length} logs
+              </span>
+            </div>
+
+            {filteredHistory.length === 0 ? (
+              <div className="empty-state">No evolution logs match the selected agent.</div>
+            ) : (
+              <>
+                <div className="history-timeline">
+                  {visibleHistory.map((log) => (
+                    <div key={log.id} className="timeline-item">
+                      <div className="timeline-marker" />
+                      <div className="timeline-content-card">
+                        <div className="timeline-header">
+                          <div>
+                            <span className={`label ${getRoleColor(log.role_id)}`} style={{ marginRight: 8 }}>
+                              {getRoleName(log.role_id)}
+                            </span>
+                            <span className="timeline-role-id">({log.role_id})</span>
+                          </div>
+                          <span className="timeline-time">
+                            {new Date(log.created_at).toLocaleString()}
+                          </span>
+                        </div>
+                        
+                        <div className="timeline-body">
+                          <div className="timeline-reasoning">
+                            <strong>Evolution Reasoning:</strong> {log.reasoning}
+                          </div>
+                          
+                          <div className="timeline-diff-grid">
+                            <div className="diff-panel diff-old">
+                              <span className="diff-title">Previous Evolved Guidelines</span>
+                              <pre>{log.old_guidelines || '(Empty Guidelines)'}</pre>
+                            </div>
+                            <div className="diff-panel diff-new">
+                              <span className="diff-title">Added Mutation Rules</span>
+                              <pre>+ {log.new_guidelines}</pre>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <div className="diff-panel diff-new">
-                        <span className="diff-title">Added Mutation Rules</span>
-                        <pre>+ {log.new_guidelines}</pre>
-                      </div>
                     </div>
-                  </div>
+                  ))}
                 </div>
-              </div>
-            ))}
-          </div>
+
+                {visibleHistory.length < filteredHistory.length && (
+                  <div className="history-load-row">
+                    <button
+                      className="btn"
+                      onClick={() => setVisibleHistoryCount(count => count + HISTORY_PAGE_SIZE)}
+                    >
+                      Load 20 More
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </>
         )}
       </div>
     </div>
