@@ -331,8 +331,11 @@
   }
   function openFromStoryLink(linkEl) {
     const story = linkEl.closest('.story');
+    // 优先用 source 自己的 title（data-source-title）；否则 fallback 到 story headline
+    const sourceTitle = linkEl.dataset.sourceTitle?.trim();
+    const fallback   = story?.querySelector('.story-headline')?.textContent.trim() || '';
     populate({
-      title: story?.querySelector('.story-headline')?.textContent.trim() || '',
+      title: sourceTitle || fallback,
       name: linkEl.querySelector('.src-name')?.textContent.trim() || 'Source',
       time: linkEl.querySelector('time')?.textContent.trim() || '',
     });

@@ -23,18 +23,24 @@
 
       "sources": [
         {
-          "id":   "src-haiguan-20260523-0812",
-          "name": "海关总署",
-          "url":  "https://www.customs.gov.cn/customs/302249/2480148/index.html",
-          "time": "08:12",
-          "lang": "zh"
+          "id":        "a1b2c3d4-e5f6-4789-abcd-ef0123456789",
+          "url":       "https://www.customs.gov.cn/customs/302249/2480148/index.html",
+          "title":     "海关总署关于跨境电商出口 HS 编码申报抽查规则升级的公告",
+          "content":   "为加强跨境电商出口监管，海关总署决定自 2026 年 6 月 1 日起对部分品类的 HS 编码申报实施重点抽查……",
+          "chars":     380,
+          "timestamp": "2026-05-23T08:12:00+08:00",
+          "lang":      "zh",
+          "market":    "cn"
         },
         {
-          "id":   "src-cifnews-20260523-0630",
-          "name": "雨果跨境",
-          "url":  "https://www.cifnews.com/article/customs-hs-code-2026",
-          "time": "06:30",
-          "lang": "zh"
+          "id":        "b2c3d4e5-f6a7-489a-bcde-f01234567890",
+          "url":       "https://www.cifnews.com/article/customs-hs-code-2026",
+          "title":     "HS 编码抽查规则升级解读：跨境卖家应对指南",
+          "content":   "今日海关总署发布新规升级 HS 编码抽查……行业分析师就中小品牌的应对策略给出建议……",
+          "chars":     320,
+          "timestamp": "2026-05-23T06:30:00+08:00",
+          "lang":      "zh",
+          "market":    "cn"
         }
       ]
     },
@@ -54,18 +60,24 @@
 
       "sources": [
         {
-          "id":   "src-caa-20260523-0800",
-          "name": "消費者庁",
-          "url":  "https://www.caa.go.jp/policies/policy/representation/...",
-          "time": "08:00",
-          "lang": "ja"
+          "id":        "c3d4e5f6-a7b8-49ab-cdef-012345678901",
+          "url":       "https://www.caa.go.jp/policies/policy/representation/...",
+          "title":     "電子商取引における価格表示の適正化に関する規範改正案",
+          "content":   "消費者庁は本日、電子商取引における価格表示規範の改正案を公表し、6 月末まで意見を募集する……",
+          "chars":     280,
+          "timestamp": "2026-05-23T08:00:00+09:00",
+          "lang":      "ja",
+          "market":    "jp"
         },
         {
-          "id":   "src-nikkei-20260523-0730",
-          "name": "日経新聞",
-          "url":  "https://www.nikkei.com/article/DGXZQOUC...",
-          "time": "07:30",
-          "lang": "ja"
+          "id":        "d4e5f6a7-b8c9-4abc-def0-123456789012",
+          "url":       "https://www.nikkei.com/article/DGXZQOUC...",
+          "title":     "楽天・ヤフー、消費者庁の表示規範改正に対応",
+          "content":   "楽天市場とヤフーショッピングは新表示規範に向けて出品者ガイドラインを更新する予定……",
+          "chars":     310,
+          "timestamp": "2026-05-23T07:30:00+09:00",
+          "lang":      "ja",
+          "market":    "jp"
         }
       ]
     },
@@ -85,18 +97,24 @@
 
       "sources": [
         {
-          "id":   "src-mk-20260523-0715",
-          "name": "매일경제",
-          "url":  "https://www.mk.co.kr/news/business/...",
-          "time": "07:15",
-          "lang": "ko"
+          "id":        "e5f6a7b8-c9d0-4bcd-ef01-234567890123",
+          "url":       "https://www.mk.co.kr/news/business/...",
+          "title":     "올리브영, 7-Eleven 한국과 6,000여 매장 확장 협력",
+          "content":   "올리브영이 세븐일레븐 코리아와 손잡고 6,000여 점포에 K-뷰티 카테고리 진출 협력을 공식 발표했다……",
+          "chars":     290,
+          "timestamp": "2026-05-23T07:15:00+09:00",
+          "lang":      "ko",
+          "market":    "kr"
         },
         {
-          "id":   "src-oy-20260523-0600",
-          "name": "Olive Young 公告",
-          "url":  "https://www.oliveyoung.co.kr/store/notice/...",
-          "time": "06:00",
-          "lang": "ko"
+          "id":        "f6a7b8c9-d0e1-4cde-f012-345678901234",
+          "url":       "https://www.oliveyoung.co.kr/store/notice/...",
+          "title":     "올리브영 × 7-Eleven 채널 확장 공식 안내",
+          "content":   "올리브영은 7-Eleven 한국과의 협력 확장을 공식 안내하며, 본격 시행 일정과 입점 절차를 공개……",
+          "chars":     280,
+          "timestamp": "2026-05-23T06:00:00+09:00",
+          "lang":      "ko",
+          "market":    "kr"
         }
       ]
     },
@@ -116,25 +134,34 @@
 
       "sources": [
         {
-          "id":   "src-reuters-20260523-0342",
-          "name": "Reuters",
-          "url":  "https://www.reuters.com/technology/tiktok-shop-vietnam-commission-2026-05-23/",
-          "time": "03:42",
-          "lang": "en"
+          "id":        "a7b8c9d0-e1f2-4def-0123-456789012345",
+          "url":       "https://www.reuters.com/technology/tiktok-shop-vietnam-commission-2026-05-23/",
+          "title":     "TikTok Shop Vietnam to raise commission rate from 5% to 8%",
+          "content":   "TikTok Shop will raise its commission rate for sellers on its Vietnam platform from 5% to 8%, effective June 2026, sources said……",
+          "chars":     410,
+          "timestamp": "2026-05-23T03:42:00+07:00",
+          "lang":      "en",
+          "market":    "sea"
         },
         {
-          "id":   "src-vnexpress-20260523-0218",
-          "name": "VnExpress",
-          "url":  "https://e.vnexpress.net/news/business/...",
-          "time": "02:18",
-          "lang": "vi"
+          "id":        "b8c9d0e1-f2a3-4ef0-1234-567890123456",
+          "url":       "https://e.vnexpress.net/news/business/...",
+          "title":     "TikTok Shop Việt Nam tăng phí hoa hồng từ 5% lên 8%",
+          "content":   "Nhiều người bán tại Việt Nam lo ngại mức phí hoa hồng mới sẽ ảnh hưởng đến biên lợi nhuận của các SKU nhỏ……",
+          "chars":     330,
+          "timestamp": "2026-05-23T02:18:00+07:00",
+          "lang":      "vi",
+          "market":    "sea"
         },
         {
-          "id":   "src-tt-announcement-20260523-0100",
-          "name": "平台公告",
-          "url":  "https://seller-vn.tiktokshop.com/announcement/...",
-          "time": "01:00",
-          "lang": "vi"
+          "id":        "c9d0e1f2-a3b4-4f01-2345-678901234567",
+          "url":       "https://seller-vn.tiktokshop.com/announcement/...",
+          "title":     "TikTok Shop VN — Cập nhật cấu trúc phí hoa hồng",
+          "content":   "Kính gửi quý người bán, TikTok Shop sẽ điều chỉnh phí hoa hồng có hiệu lực từ tháng 6 năm 2026……",
+          "chars":     240,
+          "timestamp": "2026-05-23T01:00:00+07:00",
+          "lang":      "vi",
+          "market":    "sea"
         }
       ]
     },
@@ -154,18 +181,24 @@
 
       "sources": [
         {
-          "id":   "src-brandwatch-20260523-0700",
-          "name": "Brandwatch",
-          "url":  "https://www.brandwatch.com/reports/drinkware-may-2026/",
-          "time": "07:00",
-          "lang": "en"
+          "id":        "d0e1f2a3-b4c5-4012-3456-789012345678",
+          "url":       "https://www.brandwatch.com/reports/drinkware-may-2026/",
+          "title":     "Drinkware category social sentiment report, May 2026",
+          "content":   "Stanley's social mention volume in May 2026 fell 18% year-over-year. The brand's recent color launch failed to generate meaningful buzz……",
+          "chars":     360,
+          "timestamp": "2026-05-23T07:00:00-04:00",
+          "lang":      "en",
+          "market":    "us"
         },
         {
-          "id":   "src-tiktok-trends-20260523-0545",
-          "name": "TikTok Trends",
-          "url":  "https://www.tiktok.com/business/en/blog/trending-may-2026",
-          "time": "05:45",
-          "lang": "en"
+          "id":        "e1f2a3b4-c5d6-4123-4567-890123456789",
+          "url":       "https://www.tiktok.com/business/en/blog/trending-may-2026",
+          "title":     "TikTok Trends Report: Drinkware in the US, weekly insight",
+          "content":   "Drinkware-related video posting volume in the US softened week-over-week, with category leaders showing slowing engagement……",
+          "chars":     290,
+          "timestamp": "2026-05-23T05:45:00-04:00",
+          "lang":      "en",
+          "market":    "us"
         }
       ]
     }
