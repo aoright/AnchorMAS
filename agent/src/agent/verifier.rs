@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 
 use super::{AnalyzedEvent, DoubaoClient};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct VerifyProgress {
     pub processed_count: usize,
@@ -19,6 +20,7 @@ pub struct VerifyProgress {
     pub message: String,
 }
 
+#[allow(dead_code)]
 struct VerifyOutcome {
     event_id: String,
     result: Result<AnalyzedEvent, String>,
@@ -27,6 +29,7 @@ struct VerifyOutcome {
 /// Verify analyzed events by sending them through a fact-checking prompt.
 /// Adjusts confidence scores based on logical consistency review.
 /// Runs batches concurrently (limit: 5 concurrent API requests).
+#[allow(dead_code)]
 pub async fn verify_events_with_progress<F, Fut>(
     client: &DoubaoClient,
     pool: &sqlx::SqlitePool,
@@ -139,6 +142,7 @@ where
     Ok(all_verified)
 }
 
+#[allow(dead_code)]
 async fn process_collaborative_verification(
     client: &DoubaoClient,
     pool: &sqlx::SqlitePool,
@@ -305,17 +309,7 @@ fn parse_refined_response(response: &str) -> Result<RefinedResult> {
 }
 
 fn extract_json_array_or_object(text: &str) -> String {
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
-        }
-    }
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text.rfind(']') {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
+    super::extract_json_array_or_object(text)
 }
 
 pub async fn run_critic_pass(
@@ -341,6 +335,11 @@ pub async fn run_critic_pass(
     );
 
     let response = client.chat(&critic_system_prompt, &critic_user_prompt, true).await?;
+
+    // Charge credits:
+    let tokens = (critic_system_prompt.len() + critic_user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, "critic", tokens as i64).await;
+
     let parsed = parse_critic_response(&response)?;
     Ok((parsed.approved, parsed.critique_notes, parsed.confidence_adjustment))
 }
@@ -362,6 +361,11 @@ pub async fn run_refinement_pass(
     );
 
     let response = client.chat(&refiner_system_prompt, &refiner_user_prompt, true).await?;
+
+    // Charge credits:
+    let tokens = (refiner_system_prompt.len() + refiner_user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, "refiner", tokens as i64).await;
+
     let refined = parse_refined_response(&response)?;
 
     let mut refined_event = event.clone();

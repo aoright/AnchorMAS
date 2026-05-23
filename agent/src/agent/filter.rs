@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::{DoubaoClient, FilteredEvent, RawDocument};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct FilterProgress {
     pub processed_count: usize,
@@ -23,6 +24,7 @@ pub struct FilterProgress {
 /// Filter and classify raw documents using Doubao LLM.
 /// Batches documents (up to 10 at a time) for efficient API usage.
 /// Runs batches concurrently (limit: 5 concurrent API requests).
+#[allow(dead_code)]
 pub async fn filter_events_with_progress<F, Fut>(
     client: &DoubaoClient,
     pool: &sqlx::SqlitePool,
@@ -147,6 +149,7 @@ where
     Ok(all_events)
 }
 
+#[allow(dead_code)]
 struct FilterBatchOutcome {
     batch_index: usize,
     input_count: usize,
@@ -201,6 +204,11 @@ pub async fn filter_batch(
     );
 
     let response = client.chat(&system_prompt, &user_prompt, true).await?;
+    
+    // Charge credits:
+    let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, "filter", tokens as i64).await;
+
     let events = parse_filtered_events(&response)?;
 
     Ok(events)
@@ -222,7 +230,12 @@ fn parse_filtered_events(response: &str) -> Result<Vec<FilteredEvent>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let category = item.get("category")?.as_str()?.to_string();
+            let category = item.get("category")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Custom")
+                .to_string();
             let market = item
                 .get("market")
                 .and_then(|v| v.as_str())
@@ -250,19 +263,12 @@ fn parse_filtered_events(response: &str) -> Result<Vec<FilteredEvent>> {
 
 /// Extract a JSON array from a response that might contain markdown code fences.
 fn extract_json_array(text: &str) -> String {
-    // Try to find JSON array between code fences
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text.rfind(']') {
-            return text[start..=end].to_string();
-        }
-    }
-    // Fallback: return as-is
-    text.to_string()
+    super::extract_json_array(text)
 }
 
 /// Truncate content to a maximum number of characters.
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    if content.chars().count() <= max_chars {
         content.to_string()
     } else {
         let truncated: String = content.chars().take(max_chars).collect();

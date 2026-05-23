@@ -78,9 +78,17 @@ pub async fn evolve_agents(pool: &SqlitePool, client: &DoubaoClient) -> Result<S
     // Compile the cases for the prompt
     let mut cases = String::new();
     for (i, (category, title, summary, analysis)) in rows.iter().enumerate() {
+        let role_id = match category.as_str() {
+            "Competition" => "analyst_competition".to_string(),
+            "Product" => "analyst_product".to_string(),
+            "Platform" => "analyst_platform".to_string(),
+            "Regulation" => "analyst_regulation".to_string(),
+            "Social" => "analyst_social".to_string(),
+            other => format!("analyst_{}", other.to_lowercase()),
+        };
         cases.push_str(&format!(
-            "--- 案例 #{} ---\n分类: {}\n标题: {}\n摘要: {}\n最终分析内容 (含核查备注):\n{}\n\n",
-            i + 1, category, title, summary, analysis
+            "--- 案例 #{} ---\n分类: {} (特工角色ID: {})\n标题: {}\n摘要: {}\n最终分析内容 (含核查备注):\n{}\n\n",
+            i + 1, category, role_id, title, summary, analysis
         ));
     }
 
@@ -92,13 +100,13 @@ pub async fn evolve_agents(pool: &SqlitePool, client: &DoubaoClient) -> Result<S
 你的任务：
 1. 分析冲突原因，指出分析特工之前夸大或算错分的地方，或者监督官检查不严密的地方。
 2. 总结出 1-2 条具体的业务过滤或量化修正守则（例如："对于周大福的非核心零售点变动，严禁打分超过3"，"培育钻石价格下跌不能直接列为 Opportunity"）。
-3. 决定这套新规则最适合应用在哪个 Agent 的角色（必须是 analyst_competition|analyst_product|analyst_platform|analyst_regulation|analyst_social|critic 之一）。
+3. 决定这套新规则最适合应用在哪个 Agent 的角色。这可以是核心特工（analyst_competition|analyst_product|analyst_platform|analyst_regulation|analyst_social|critic），或者是任何在冲突案例中出现的自定义分析特工角色（格式如 analyst_xxxx，请从案例数据提供的“特工角色ID”字段中直接获取，不要输出不存在的ID）。
 
 请以 JSON 格式输出你的进化建议：
 {
   "updates": [
     {
-      "target_role_id": "被优化的 Agent 角色ID，如 analyst_competition",
+      "target_role_id": "被优化的 Agent 角色ID，如 analyst_competition 或 analyst_policyincentive",
       "reasoning": "为什么需要增加这一条，发现的系统性共性问题是什么",
       "new_guidelines": "新增的业务守则，将被追加到该 Agent 的 guidelines 中（文字应直接简练，50字以内）"
     }
@@ -174,7 +182,14 @@ pub async fn evolve_agents(pool: &SqlitePool, client: &DoubaoClient) -> Result<S
             .execute(pool)
             .await?;
 
-            let target_name = get_role_name(&update.target_role_id);
+            let target_name: String = sqlx::query_scalar(
+                "SELECT name FROM agent_playbook WHERE role_id = ?"
+            )
+            .bind(&update.target_role_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or_default()
+            .unwrap_or_else(|| get_role_name(&update.target_role_id));
             let msg = format!(
                 "成功优化 Agent【{}】配置至 v{}！\n优化原因：{}\n新增守则：{}\n\n",
                 target_name, new_version, update.reasoning, update.new_guidelines
@@ -254,7 +269,7 @@ pub async fn evolve_from_feedback_log(
         .await
         .unwrap_or_default();
 
-        let (_name, old_guidelines, version) = match current_playbook {
+        let (name, old_guidelines, version) = match current_playbook {
             Some(data) => data,
             None => {
                 tracing::warn!(role = %receiver, "Feedback received for unknown agent role. Skipping evolution.");
@@ -282,7 +297,7 @@ pub async fn evolve_from_feedback_log(
         let user_prompt = format!(
             "目标 Agent 角色ID: {}\n该 Agent 角色名称: {}\n\n【该 Agent 当前的进化守则】：\n{}\n\n【针对该 Agent 的协作反馈意见列表】：\n{}\n\n请分析上述反馈，结合现有的进化守则，为该 Agent 优化并输出一份最新合并的、结构化的【完整进化守则】。",
             receiver,
-            get_role_name(&receiver),
+            name,
             if old_guidelines.trim().is_empty() { "暂无" } else { &old_guidelines },
             logs_str
         );
@@ -351,8 +366,8 @@ pub async fn evolve_from_feedback_log(
         if !new_guidelines.trim().starts_with('-') && !new_guidelines.trim().is_empty() {
             evolution_feedback.push("生成的新进化守则不是以 '-' 开头的 Markdown 列表格式，请修改为标准列表。");
         }
-        if new_guidelines.chars().count() > 300 {
-            evolution_feedback.push("进化守则文字超过300字限制，过于冗长，请压缩。");
+        if new_guidelines.chars().count() > 500 {
+            evolution_feedback.push("进化守则文字超过500字限制，过于冗长，请压缩。");
         }
         if new_guidelines.contains("- -") {
             evolution_feedback.push("进化守则中存在不正确的嵌套或重复的减号列表符。");
@@ -386,12 +401,7 @@ pub async fn evolve_from_feedback_log(
 }
 
 fn extract_json_object(text: &str) -> String {
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
+    super::extract_json_object(text)
 }
 
 fn get_role_name(role_id: &str) -> String {

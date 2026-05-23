@@ -220,7 +220,7 @@ pub async fn get_news_detail(
         if !url_strings.is_empty() {
             for url_chunk in url_strings.chunks(50) {
                 let mut qb = sqlx::QueryBuilder::new(
-                    "SELECT source_url, title, content FROM raw_articles WHERE source_url IN (",
+                    "SELECT COALESCE(resolved_url, source_url) AS source_url, title, content FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN (",
                 );
                 let mut sep = qb.separated(", ");
                 for url in url_chunk {
@@ -274,6 +274,7 @@ pub struct BriefingListItem {
     pub id: String,
     pub date: String,
     pub overview: serde_json::Value,
+    pub event_count: i64,
     pub created_at: String,
 }
 
@@ -318,10 +319,12 @@ pub async fn list_briefings(
             internal_error("Database error")
         })?;
 
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
-        r#"SELECT id, date, overview, created_at
-           FROM briefings
-           ORDER BY created_at DESC
+    let rows = sqlx::query_as::<_, (String, String, String, i64, String)>(
+        r#"SELECT b.id, b.date, b.overview, COUNT(be.event_id) AS event_count, b.created_at
+           FROM briefings b
+           LEFT JOIN briefing_events be ON be.briefing_id = b.id
+           GROUP BY b.id, b.date, b.overview, b.created_at
+           ORDER BY b.created_at DESC
            LIMIT ? OFFSET ?"#,
     )
     .bind(size)
@@ -339,7 +342,8 @@ pub async fn list_briefings(
             id: r.0,
             date: r.1,
             overview: serde_json::from_str(&r.2).unwrap_or(serde_json::json!({})),
-            created_at: r.3,
+            event_count: r.3,
+            created_at: r.4,
         })
         .collect();
 
@@ -403,10 +407,12 @@ async fn build_briefing_response(
     // Load events for this briefing
     let events = if let Some(market) = market_filter {
         sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64, i64, String, String, String)>(
-            r#"SELECT id, title, summary, market, category, impact_type,
-                      severity, urgency, confidence, source_urls, analysis, created_at
-               FROM events WHERE briefing_id = ? AND market = ?
-               ORDER BY severity DESC, urgency DESC"#,
+            r#"SELECT e.id, e.title, e.summary, e.market, e.category, e.impact_type,
+                      e.severity, e.urgency, e.confidence, e.source_urls, e.analysis, e.created_at
+               FROM events e
+               JOIN briefing_events be ON be.event_id = e.id
+               WHERE be.briefing_id = ? AND e.market = ?
+               ORDER BY be.position ASC, e.severity DESC, e.urgency DESC"#,
         )
         .bind(&id)
         .bind(market)
@@ -414,15 +420,18 @@ async fn build_briefing_response(
         .await
     } else {
         sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64, i64, String, String, String)>(
-            r#"SELECT id, title, summary, market, category, impact_type,
-                      severity, urgency, confidence, source_urls, analysis, created_at
-               FROM events WHERE briefing_id = ?
-               ORDER BY severity DESC, urgency DESC"#,
+            r#"SELECT e.id, e.title, e.summary, e.market, e.category, e.impact_type,
+                      e.severity, e.urgency, e.confidence, e.source_urls, e.analysis, e.created_at
+               FROM events e
+               JOIN briefing_events be ON be.event_id = e.id
+               WHERE be.briefing_id = ?
+               ORDER BY be.position ASC, e.severity DESC, e.urgency DESC"#,
         )
         .bind(&id)
         .fetch_all(&state.pool)
         .await
     }
+
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to query briefing events");
         internal_error("Database error")
@@ -701,14 +710,19 @@ pub async fn send_message(
                         if let Ok(urls) = serde_json::from_str::<Vec<String>>(&e.5) {
                             for url in urls.iter().take(3) {
                                 if let Ok(Some(raw)) = sqlx::query_as::<_, (String, String)>(
-                                    "SELECT title, content FROM raw_articles WHERE source_url = ?"
+                                    "SELECT title, content FROM raw_articles WHERE COALESCE(resolved_url, source_url) = ?"
                                 )
                                 .bind(url)
                                 .fetch_optional(&state.pool)
                                 .await
                                 {
                                     if !raw.1.is_empty() {
-                                        let snippet = if raw.1.len() > 2000 { &raw.1[..2000] } else { &raw.1 };
+                                        let snippet = if raw.1.len() > 2000 {
+                                            let end = raw.1.floor_char_boundary(2000);
+                                            &raw.1[..end]
+                                        } else {
+                                            &raw.1
+                                        };
                                         context_parts.push(format!("【原文摘录 - {}】\n{}\n", raw.0, snippet));
                                     }
                                 }
@@ -733,7 +747,12 @@ pub async fn send_message(
                     ));
                     // Load events summary
                     if let Ok(events) = sqlx::query_as::<_, (String, String, String, String)>(
-                        "SELECT title, summary, market, category FROM events WHERE briefing_id = ? ORDER BY severity DESC LIMIT 10"
+                        r#"SELECT e.title, e.summary, e.market, e.category
+                           FROM events e
+                           JOIN briefing_events be ON be.event_id = e.id
+                           WHERE be.briefing_id = ?
+                           ORDER BY be.position ASC, e.severity DESC
+                           LIMIT 10"#
                     )
                     .bind(briefing_id)
                     .fetch_all(&state.pool)

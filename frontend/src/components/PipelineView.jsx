@@ -212,10 +212,16 @@ export default function PipelineView() {
     return () => clearInterval(interval)
   }, [fetchStatus, pipelineData.status])
 
-  const handleRunPipeline = async (force = false) => {
+  const handleRunPipeline = async (force = false, synthesizeOnly = false) => {
     setRunStatus('running')
     try {
-      const res = await fetch(`/api/scan${force ? '?force=true' : ''}`, { method: 'POST' })
+      let url = '/api/scan'
+      if (synthesizeOnly) {
+        url += '?synthesize_only=true'
+      } else if (force) {
+        url += '?force=true'
+      }
+      const res = await fetch(url, { method: 'POST' })
       if (res.ok || res.status === 202) {
         setRunStatus('triggered')
         setTimeout(() => {
@@ -334,6 +340,13 @@ export default function PipelineView() {
             disabled={runStatus !== 'idle' || !backendConnected || data.status === 'running'}
           >
             Force Rescan
+          </button>
+          <button
+            className="btn"
+            onClick={() => handleRunPipeline(false, true)}
+            disabled={runStatus !== 'idle' || !backendConnected || data.status === 'running'}
+          >
+            Re-synthesize Briefing (Synthesizer Only)
           </button>
           <button className="btn" onClick={fetchStatus} disabled={loading}>
             Refresh Status

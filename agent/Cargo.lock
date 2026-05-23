@@ -39,6 +39,7 @@ dependencies = [
  "base64",
  "chrono",
  "dotenvy",
+ "ego-tree",
  "feed-rs",
  "futures-util",
  "qdrant-client",
@@ -52,6 +53,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

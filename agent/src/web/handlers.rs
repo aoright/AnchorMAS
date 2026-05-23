@@ -34,6 +34,7 @@ struct BriefingListItem {
     id: String,
     date: String,
     overview: String,
+    event_count: i64,
     created_at: String,
 }
 
@@ -93,6 +94,8 @@ struct ScanResponse {
 #[derive(Deserialize, Default)]
 pub struct ScanQuery {
     force: Option<bool>,
+    synthesize_only: Option<bool>,
+    hours: Option<u32>,
 }
 
 struct CachedBriefingSummary {
@@ -118,7 +121,7 @@ pub async fn get_raw_articles(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let rows = sqlx::query_as::<_, RawArticleRow>(
-        r#"SELECT id, source_url, title, content, raw_language, market, created_at
+        r#"SELECT id, COALESCE(resolved_url, source_url) AS source_url, title, content, raw_language, market, created_at
            FROM raw_articles
            ORDER BY created_at DESC
            LIMIT 500"#,
@@ -164,7 +167,7 @@ pub async fn get_pipeline_status(
 pub async fn get_latest_briefing(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let briefing_row = sqlx::query_as::<_, BriefingRow>(
+    let briefing = sqlx::query_as::<_, BriefingRow>(
         r#"SELECT id, date, overview, heatmap_json, recommendations_json, created_at
            FROM briefings
            ORDER BY created_at DESC
@@ -182,23 +185,63 @@ pub async fn get_latest_briefing(
         )
     })?;
 
-    let briefing = match briefing_row {
-        Some(row) => row,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "No briefings found".to_string(),
-                }),
-            ));
-        }
-    };
+    let briefing = briefing.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "No briefings found".to_string(),
+            }),
+        )
+    })?;
 
+    Ok(Json(build_briefing_response(&state, briefing).await?))
+}
+
+/// GET /api/briefings/:id
+pub async fn get_briefing_by_id(
+    State(state): State<AppState>,
+    Path(briefing_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let briefing = sqlx::query_as::<_, BriefingRow>(
+        r#"SELECT id, date, overview, heatmap_json, recommendations_json, created_at
+           FROM briefings
+           WHERE id = ?"#,
+    )
+    .bind(&briefing_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, briefing_id = %briefing_id, "Failed to query briefing");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+            }),
+        )
+    })?;
+
+    let briefing = briefing.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Briefing not found".to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(build_briefing_response(&state, briefing).await?))
+}
+
+async fn build_briefing_response(
+    state: &AppState,
+    briefing: BriefingRow,
+) -> Result<BriefingResponse, (StatusCode, Json<ErrorResponse>)> {
     let event_rows = sqlx::query_as::<_, EventRow>(
         r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
-           FROM events
-           WHERE briefing_id = ?
-           ORDER BY severity DESC, urgency DESC"#,
+           FROM events e
+           JOIN briefing_events be ON be.event_id = e.id
+           WHERE be.briefing_id = ?
+           ORDER BY be.position ASC, e.severity DESC, e.urgency DESC"#,
     )
     .bind(&briefing.id)
     .fetch_all(&state.pool)
@@ -228,7 +271,7 @@ pub async fn get_latest_briefing(
         let urls_vec: Vec<String> = unique_urls.into_iter().collect();
         for chunk in urls_vec.chunks(500) {
             let mut query_builder = sqlx::QueryBuilder::new(
-                "SELECT source_url, title, content FROM raw_articles WHERE source_url IN ("
+                "SELECT COALESCE(resolved_url, source_url) AS source_url, title, content FROM raw_articles WHERE COALESCE(resolved_url, source_url) IN ("
             );
             let mut separated = query_builder.separated(", ");
             for url in chunk {
@@ -299,7 +342,7 @@ pub async fn get_latest_briefing(
         created_at: briefing.created_at,
     };
 
-    Ok(Json(response))
+    Ok(response)
 }
 
 /// GET /api/briefings
@@ -307,9 +350,11 @@ pub async fn list_briefings(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let rows = sqlx::query_as::<_, BriefingListRow>(
-        r#"SELECT id, date, overview, created_at
-           FROM briefings
-           ORDER BY created_at DESC"#,
+        r#"SELECT b.id, b.date, b.overview, b.created_at, COUNT(be.event_id) AS event_count
+           FROM briefings b
+           LEFT JOIN briefing_events be ON be.briefing_id = b.id
+           GROUP BY b.id, b.date, b.overview, b.created_at
+           ORDER BY b.created_at DESC"#,
     )
     .fetch_all(&state.pool)
     .await
@@ -329,6 +374,7 @@ pub async fn list_briefings(
             id: row.id,
             date: row.date,
             overview: row.overview,
+            event_count: row.event_count,
             created_at: row.created_at,
         })
         .collect();
@@ -343,9 +389,9 @@ pub async fn trigger_scan(
     State(state): State<AppState>,
     Query(query): Query<ScanQuery>,
 ) -> impl IntoResponse {
-    // Check if already running
+    // Atomically check-and-set to prevent TOCTOU race condition
     {
-        let status = state.pipeline_status.read().await;
+        let mut status = state.pipeline_status.write().await;
         if status.status == "running" {
             return (
                 StatusCode::CONFLICT,
@@ -355,13 +401,11 @@ pub async fn trigger_scan(
                 }),
             );
         }
-    }
 
-    if !query.force.unwrap_or(false) {
-        match get_latest_briefing_summary(&state.pool).await {
-            Ok(Some(summary)) => {
-                {
-                    let mut status = state.pipeline_status.write().await;
+        if !query.force.unwrap_or(false) && !query.synthesize_only.unwrap_or(false) && query.hours.is_none() {
+            // Check for cached briefing (non-force, non-synthesize-only mode)
+            match get_latest_briefing_summary(&state.pool).await {
+                Ok(Some(summary)) => {
                     status.status = "completed".to_string();
                     status.current_step = None;
                     status.last_run = Some(summary.created_at.clone());
@@ -383,26 +427,23 @@ pub async fn trigger_scan(
                         updated_at: Some(summary.created_at),
                         ..super::PipelineProgressDetails::default()
                     };
+
+                    return (
+                        StatusCode::OK,
+                        Json(ScanResponse {
+                            status: "cached".to_string(),
+                            message: "Loaded cached briefing from database".to_string(),
+                        }),
+                    );
                 }
-
-                return (
-                    StatusCode::OK,
-                    Json(ScanResponse {
-                        status: "cached".to_string(),
-                        message: "Loaded cached briefing from database".to_string(),
-                    }),
-                );
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to inspect cached briefing");
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to inspect cached briefing");
-            }
-        }
 
-        match get_raw_article_count(&state.pool).await {
-            Ok(raw_count) if raw_count > 0 => {
-                {
-                    let mut status = state.pipeline_status.write().await;
+            match get_raw_article_count(&state.pool).await {
+                Ok(raw_count) if raw_count > 0 => {
                     status.status = "idle".to_string();
                     status.current_step = None;
                     status.error_message = None;
@@ -419,21 +460,32 @@ pub async fn trigger_scan(
                         updated_at: Some(chrono::Utc::now().to_rfc3339()),
                         ..super::PipelineProgressDetails::default()
                     };
-                }
 
-                return (
-                    StatusCode::OK,
-                    Json(ScanResponse {
-                        status: "cached_raw".to_string(),
-                        message: "Loaded cached raw articles from database".to_string(),
-                    }),
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to inspect cached raw articles");
+                    return (
+                        StatusCode::OK,
+                        Json(ScanResponse {
+                            status: "cached_raw".to_string(),
+                            message: "Loaded cached raw articles from database".to_string(),
+                        }),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to inspect cached raw articles");
+                }
             }
         }
+
+        // Set status to running while still holding the write lock
+        status.status = "running".to_string();
+        status.current_step = Some("harvester".to_string());
+        status.error_message = None;
+        status.stats = super::PipelineStats::default();
+        status.progress = super::PipelineProgressDetails {
+            message: Some("Starting harvest".to_string()),
+            updated_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..super::PipelineProgressDetails::default()
+        };
     }
 
     let config = state.config.clone();
@@ -442,22 +494,10 @@ pub async fn trigger_scan(
     let pipeline_status = state.pipeline_status.clone();
 
     let force = query.force.unwrap_or(false);
+    let synthesize_only = query.synthesize_only.unwrap_or(false);
+    let hours = query.hours;
 
     tokio::spawn(async move {
-        // Set status to running
-        {
-            let mut status = pipeline_status.write().await;
-            status.status = "running".to_string();
-            status.current_step = Some("harvester".to_string());
-            status.error_message = None;
-            status.stats = super::PipelineStats::default();
-            status.progress = super::PipelineProgressDetails {
-                message: Some("Starting harvest".to_string()),
-                updated_at: Some(chrono::Utc::now().to_rfc3339()),
-                ..super::PipelineProgressDetails::default()
-            };
-        }
-
         tracing::info!("Background scan pipeline started");
 
         let progress_status = pipeline_status.clone();
@@ -515,7 +555,7 @@ pub async fn trigger_scan(
             }
         };
 
-        match agent::run_pipeline_with_progress(&config, &pool, qdrant.as_deref(), force, report_progress).await {
+        match agent::run_pipeline_with_progress(&config, &pool, qdrant.as_deref(), force, synthesize_only, hours, report_progress).await {
             Ok(briefing) => {
                 let mut status = pipeline_status.write().await;
                 status.status = "completed".to_string();
@@ -562,8 +602,10 @@ pub async fn chat(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let event_rows = sqlx::query_as::<_, EventRow>(
         r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
-           FROM events
-           WHERE briefing_id = ?"#,
+           FROM events e
+           JOIN briefing_events be ON be.event_id = e.id
+           WHERE be.briefing_id = ?
+           ORDER BY be.position ASC, e.severity DESC, e.urgency DESC"#,
     )
     .bind(&payload.briefing_id)
     .fetch_all(&state.pool)
@@ -781,7 +823,7 @@ async fn get_latest_briefing_summary(
         .await?
         .max(0) as usize;
     let event_count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE briefing_id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM briefing_events WHERE briefing_id = ?")
             .bind(&briefing_id)
             .fetch_one(pool)
             .await?
@@ -830,6 +872,7 @@ struct BriefingListRow {
     id: String,
     date: String,
     overview: String,
+    event_count: i64,
     created_at: String,
 }
 
@@ -1265,23 +1308,63 @@ pub async fn get_evidence_chain(
         created_at: bookmark_row.bookmark_created_at,
     };
 
+    #[derive(sqlx::FromRow)]
+    struct ChainRecord {
+        matched_event_id: String,
+        title: String,
+        summary: String,
+        created_at: String,
+        direction: String,
+        match_score: f64,
+        match_reason: String,
+    }
+
+    let query_str = r#"
+        SELECT c.matched_event_id, e.title, e.summary, e.created_at, c.direction, c.match_score, c.match_reason
+        FROM bookmark_evidence_chain c
+        JOIN events e ON c.matched_event_id = e.id
+        WHERE c.bookmark_id = ?
+    "#;
+
     // 2. Fetch matched events in the chain
-    let matched_rows = sqlx::query!(
-        r#"SELECT c.matched_event_id, e.title, e.summary, e.created_at, c.direction, c.match_score, c.match_reason
-           FROM bookmark_evidence_chain c
-           JOIN events e ON c.matched_event_id = e.id
-           WHERE c.bookmark_id = ?"#,
-        id
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to query evidence chain: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: "Database error".to_string() }),
+    let mut matched_rows = sqlx::query_as::<_, ChainRecord>(query_str)
+        .bind(&id)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to query evidence chain: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: "Database error".to_string() }),
+            )
+        })?;
+
+    if matched_rows.is_empty() {
+        tracing::info!("Evidence chain is empty for bookmark {}, triggering on-demand retrospective tracing...", id);
+        let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+        // Run it synchronously so we can return the newly found nodes immediately!
+        if let Err(e) = agent::tracker::run_retrospective_tracing(
+            &doubao,
+            &state.pool,
+            state.qdrant.as_ref().map(|q| q.as_ref()),
+            &id,
+            &bookmark_row.event_id,
+            &state.config,
         )
-    })?;
+        .await
+        {
+            tracing::error!("On-demand retrospective tracing failed for bookmark {}: {}", id, e);
+        } else {
+            // Re-fetch matched rows
+            if let Ok(rows) = sqlx::query_as::<_, ChainRecord>(query_str)
+                .bind(&id)
+                .fetch_all(&state.pool)
+                .await
+            {
+                matched_rows = rows;
+            }
+        }
+    }
 
     // 3. Construct chronological chain with consolidation of duplicates by title
     use std::collections::HashMap;
@@ -1415,4 +1498,165 @@ pub async fn get_evidence_chain(
     Ok(Json(EvidenceChainResponse { bookmark, chain }))
 }
 
+// ─── Agent Parliament Handlers ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ProposalInput {
+    pub proposer_role_id: String,
+    pub title: String,
+    pub description: String,
+    pub proposal_type: String, // 'constitutional', 'budget', 'merger', 'admission'
+}
+
+#[derive(Deserialize)]
+pub struct CrossoverInput {
+    pub parent_a: String,
+    pub parent_b: String,
+    pub category: String,
+}
+
+pub async fn get_parliament_registry(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let rows_res = sqlx::query_as::<_, (String, String, String, Option<String>, i32, i32, i64, i64, String, String, String, String)>(
+        r#"SELECT r.role_id, name, status, sponsor_role_id, tasks_completed, tasks_failed, token_cost, compute_credits, faction, r.created_at, last_active_at, last_evolved_at
+           FROM agent_parliament_registry r
+           JOIN agent_playbook p ON r.role_id = p.role_id
+           ORDER BY r.created_at DESC"#
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows_res {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "role_id": r.0,
+                    "name": r.1,
+                    "status": r.2,
+                    "sponsor_role_id": r.3,
+                    "tasks_completed": r.4,
+                    "tasks_failed": r.5,
+                    "token_cost": r.6,
+                    "compute_credits": r.7,
+                    "faction": r.8,
+                    "created_at": r.9,
+                    "last_active_at": r.10,
+                    "last_evolved_at": r.11,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn get_parliament_ledger(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let rows_res = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+        "SELECT id, event_type, role_id, details, created_at FROM parliament_ledger ORDER BY created_at DESC"
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows_res {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                let parsed_details: serde_json::Value = serde_json::from_str(&r.3).unwrap_or(serde_json::json!({ "raw": r.3 }));
+                serde_json::json!({
+                    "id": r.0,
+                    "event_type": r.1,
+                    "role_id": r.2,
+                    "details": parsed_details,
+                    "created_at": r.4,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn list_proposals(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let rows_res = sqlx::query_as::<_, (String, String, String, String, String, String, f64, f64, String, Option<String>)>(
+        "SELECT id, proposer_role_id, title, description, proposal_type, status, yes_votes, no_votes, created_at, resolved_at FROM parliament_proposals ORDER BY created_at DESC"
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows_res {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "id": r.0,
+                    "proposer_role_id": r.1,
+                    "title": r.2,
+                    "description": r.3,
+                    "proposal_type": r.4,
+                    "status": r.5,
+                    "yes_votes": r.6,
+                    "no_votes": r.7,
+                    "created_at": r.8,
+                    "resolved_at": r.9,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn create_proposal(
+    State(state): State<AppState>,
+    Json(input): Json<ProposalInput>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+
+    match agent::parliament::propose_and_vote(&state.pool, &doubao, &input.proposer_role_id, &input.title, &input.description, &input.proposal_type).await {
+        Ok(summary) => (StatusCode::CREATED, Json(serde_json::json!({ "status": "resolved", "summary": summary }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn vote_on_proposal(
+    Path(id): Path<String>,
+    State(_state): State<AppState>,
+) -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "message": format!("Proposal {} is already fully resolved.", id) }))).into_response()
+}
+
+pub async fn trigger_parliament_trial(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+
+    match agent::parliament::run_stagnation_audit(&state.pool, &doubao).await {
+        Ok(log) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "log": log }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn distribute_compute_credits(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match agent::parliament::distribute_weekly_credits(&state.pool).await {
+        Ok(msg) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "message": msg }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+pub async fn trigger_crossover(
+    State(state): State<AppState>,
+    Json(input): Json<CrossoverInput>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+
+    match agent::parliament::run_hybrid_crossover(&state.pool, &doubao, &input.parent_a, &input.parent_b, &input.category).await {
+        Ok(msg) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "message": msg }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
 

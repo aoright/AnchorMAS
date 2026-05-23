@@ -104,25 +104,69 @@ async fn get_embeddings_internal(config: &Config, texts: &[String]) -> Result<Ve
             input: chunk.to_vec(),
         };
 
-        let response = client
-            .post(&config.embedding_api_url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", config.ark_api_key))
-            .json(&payload)
-            .send()
-            .await?;
+        let mut batch_success = false;
+        for attempt in 0..3u32 {
+            let response = client
+                .post(&config.embedding_api_url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", config.ark_api_key))
+                .json(&payload)
+                .send()
+                .await;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("DashScope Embedding API error ({}): {}", status, err_body);
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt < 2 {
+                        let delay = std::time::Duration::from_secs(if attempt == 0 { 1 } else { 3 });
+                        tracing::warn!(attempt = attempt + 1, error = %e, "Embedding API request failed, retrying in {:?}...", delay);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    tracing::error!("Embedding API request failed after 3 attempts: {}", e);
+                    break;
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let err_body = response.text().await.unwrap_or_default();
+                let is_retryable = status.as_u16() == 429 || status.as_u16() >= 500;
+                if is_retryable && attempt < 2 {
+                    let delay = std::time::Duration::from_secs(if attempt == 0 { 1 } else { 3 });
+                    tracing::warn!(attempt = attempt + 1, status = %status, "Embedding API retryable error, backing off {:?}...", delay);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                tracing::error!("Embedding API error ({}): {}", status, err_body);
+                break;
+            }
+
+            match response.json::<EmbeddingResponse>().await {
+                Ok(resp) => {
+                    for data in resp.data {
+                        let absolute_idx = batch_idx * 10 + data.index;
+                        if absolute_idx < results.len() {
+                            results[absolute_idx] = Some(data.embedding);
+                        }
+                    }
+                    batch_success = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse embedding response: {}", e);
+                    break; // Parse errors are not retryable
+                }
+            }
         }
 
-        let resp: EmbeddingResponse = response.json().await?;
-        for data in resp.data {
-            let absolute_idx = batch_idx * 10 + data.index;
-            if absolute_idx < results.len() {
-                results[absolute_idx] = Some(data.embedding);
+        if !batch_success {
+            tracing::warn!(batch_idx, "Embedding batch {} failed after retries, using pseudo-embeddings for this chunk", batch_idx);
+            for (i, text) in chunk.iter().enumerate() {
+                let absolute_idx = batch_idx * 10 + i;
+                if absolute_idx < results.len() && results[absolute_idx].is_none() {
+                    results[absolute_idx] = Some(pseudo_embedding(text));
+                }
             }
         }
     }

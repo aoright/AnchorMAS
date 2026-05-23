@@ -1216,6 +1216,58 @@ select.input {
 }
 
 /* ===== Rich Briefing Styles ===== */
+.briefing-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.briefing-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 360px;
+}
+
+.briefing-selector label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.briefing-select {
+  width: 100%;
+}
+
+.briefing-meta {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (max-width: 760px) {
+  .briefing-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .briefing-selector {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
 .briefing-summary {
   font-size: 14px;
   line-height: 1.6;
@@ -2022,3 +2074,764 @@ select.input {
   }
 }
 
+/* ===== Agent Parliament View ===== */
+.parliament-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  animation: fadeIn 0.4s ease-out;
+}
+
+.parliament-banner {
+  position: relative;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 24px;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+}
+
+.banner-glow-effect {
+  display: none;
+}
+
+.banner-content {
+  max-width: 70%;
+  position: relative;
+  z-index: 1;
+}
+
+.banner-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.banner-badge {
+  font-size: 10px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  width: fit-content;
+  border: 1px solid var(--color-border);
+}
+
+.parliament-banner h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.parliament-banner p {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.banner-actions {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+/* Stats Grid */
+.parliament-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.stat-card {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.stat-subtitle {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+/* Colors */
+.text-blue { color: var(--color-blue) !important; }
+.text-green { color: var(--color-green) !important; }
+.text-amber { color: var(--color-amber) !important; }
+.text-danger { color: var(--color-red) !important; }
+.font-bold { font-weight: 600; }
+.font-mono { font-family: var(--font-mono); }
+.w-100 { width: 100%; }
+.margin-top-12 { margin-top: 12px; }
+
+/* Layout Grid */
+.parliament-layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+@media (max-width: 968px) {
+  .parliament-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.parliament-main-col {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.parliament-side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  position: sticky;
+  top: 24px;
+}
+
+.parliament-section {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.01);
+}
+
+.section-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 8px;
+}
+
+.section-header-row .section-title {
+  margin-bottom: 0;
+}
+
+.section-desc {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-bottom: 16px;
+}
+
+/* Registry Table */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.parliament-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+
+.parliament-table th {
+  padding: 12px 16px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  border-bottom: 2px solid var(--color-border);
+}
+
+.parliament-table td {
+  padding: 16px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.agent-name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-name-cell strong {
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.agent-role-id {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+
+.agent-sponsor {
+  font-size: 10px;
+  color: var(--color-blue);
+  background: rgba(37, 99, 235, 0.05);
+  padding: 1px 4px;
+  border-radius: 3px;
+  width: fit-content;
+}
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.badge-creativity {
+  background: rgba(124, 58, 237, 0.1);
+  color: #7c3aed;
+}
+
+.badge-efficiency {
+  background: rgba(5, 150, 109, 0.1);
+  color: #059669;
+}
+
+.badge-neutral {
+  background: rgba(107, 114, 128, 0.1);
+  color: #6b7280;
+}
+
+.badge-status-active {
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+}
+
+.badge-status-probation {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+}
+
+.badge-status-parole {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+.badge-status-bankrupt {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+/* Progress bar */
+.progress-bar-container {
+  width: 100%;
+  height: 4px;
+  background: var(--color-border);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.bg-success { background-color: var(--color-green); }
+.bg-warning { background-color: var(--color-amber); }
+.bg-danger { background-color: var(--color-red); }
+
+.sr-cell {
+  display: flex;
+  flex-direction: column;
+}
+
+.sr-detail {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.credit-cell {
+  display: flex;
+  flex-direction: column;
+  width: 120px;
+}
+
+/* Proposals */
+.proposals-split {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .proposals-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.proposals-list-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.proposals-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.proposal-item-card {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.proposal-item-card:hover {
+  transform: translateY(-1px);
+  border-color: #cbd5e1;
+}
+
+.proposal-item-card.status-passed {
+  border-left: 4px solid var(--color-green);
+}
+
+.proposal-item-card.status-rejected {
+  border-left: 4px solid var(--color-red);
+}
+
+.proposal-item-card.status-voting {
+  border-left: 4px solid var(--color-blue);
+  background: rgba(37, 99, 235, 0.01);
+}
+
+.proposal-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+}
+
+.proposal-item-type {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.05em;
+  background: var(--color-border);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.proposal-item-header h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-top: 4px;
+}
+
+.proposal-item-desc {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.proposal-item-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
+}
+
+.proposal-votes-gauge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  gap: 8px;
+}
+
+.gauge-track {
+  flex-grow: 1;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  display: flex;
+  overflow: hidden;
+}
+
+.gauge-fill-yes {
+  height: 100%;
+  background: var(--color-green);
+}
+
+.gauge-fill-no {
+  height: 100%;
+  background: var(--color-red);
+}
+
+.proposal-meta-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--color-text-secondary);
+}
+
+.badge-proposal-passed { background: rgba(5, 150, 109, 0.1); color: var(--color-green); }
+.badge-proposal-rejected { background: rgba(220, 38, 38, 0.1); color: var(--color-red); }
+.badge-proposal-voting { background: rgba(37, 99, 235, 0.1); color: var(--color-blue); }
+
+/* Forms */
+.parliament-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.parliament-form h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-group label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  background: var(--color-bg);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--color-blue);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+
+.input-textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+.form-result-box {
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.success-box {
+  background: rgba(5, 150, 109, 0.05);
+  border: 1px solid rgba(5, 150, 109, 0.2);
+  color: #047857;
+}
+
+.success-box p {
+  margin-top: 4px;
+}
+
+/* Trial Arena */
+.trial-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trial-controls {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}
+
+.courtroom-anim-box {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 40px 20px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.scale-glow-ring {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.courtroom-loading-text {
+  color: var(--color-text-secondary);
+  font-size: 13.5px;
+  max-width: 400px;
+  line-height: 1.6;
+}
+
+.trial-result-log {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.trial-result-log h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 6px;
+}
+
+.trial-result-log pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+/* Graveyard */
+.graveyard-section {
+  position: relative;
+  background: var(--color-bg) !important;
+  border: 1px solid var(--color-border) !important;
+}
+
+.graveyard-fog {
+  display: none;
+}
+
+.tombstone-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+  position: relative;
+  z-index: 1;
+}
+
+.tombstone-card {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: transform 0.2s;
+  border-top: 3px solid var(--color-text-secondary);
+}
+
+.tombstone-card:hover {
+  transform: translateY(-2px);
+  border-color: #d1d5db;
+}
+
+.tombstone-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.tombstone-role {
+  font-family: var(--font-mono);
+}
+
+.tombstone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  text-align: center;
+}
+
+.tombstone-grave-icon {
+  font-size: 18px;
+  color: var(--color-text-secondary);
+}
+
+.tombstone-body h5 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.death-note {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.last-words-box {
+  background: var(--color-surface);
+  border-left: 2px solid var(--color-text-secondary);
+  padding: 8px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  text-align: left;
+  width: 100%;
+}
+
+.last-words-box p {
+  font-style: italic;
+  margin-top: 4px;
+}
+
+.cemetery-empty {
+  padding: 40px 0;
+  color: var(--color-text-secondary);
+}
+
+.cemetery-icon {
+  display: none;
+}
+
+/* Immutable Ledger Timeline */
+.ledger-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 600px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.ledger-timeline-item {
+  position: relative;
+  padding-left: 14px;
+  border-left: 2px solid var(--color-border);
+}
+
+.ledger-timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-border);
+}
+
+.ledger-timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.ledger-type-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.ledger-timeline-time {
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.ledger-timeline-summary {
+  font-size: 12px;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+/* Ledger badge coloring */
+.ledger-badge-trial { background: rgba(245, 158, 11, 0.1); color: var(--color-amber); }
+.ledger-badge-proposal { background: rgba(5, 150, 109, 0.1); color: var(--color-green); }
+.ledger-badge-bankruptcy { background: rgba(239, 68, 68, 0.1); color: var(--color-red); }
+.ledger-badge-crossover { background: rgba(124, 58, 237, 0.1); color: #7c3aed; }
+.ledger-badge-admission { background: rgba(59, 130, 246, 0.1); color: var(--color-blue); }
+.ledger-badge-default { background: var(--color-border); color: var(--color-text-secondary); }
+
+/* Notice Alerts */
+.notification-bar {
+  padding: 12px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 500;
+  animation: slideDown 0.3s ease;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+}
+
+.notice-success {
+  background: var(--color-green);
+  color: white;
+}
+
+.notice-error {
+  background: var(--color-red);
+  color: white;
+}
+
+@keyframes slideDown {
+  from { transform: translateY(-20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

@@ -4,9 +4,13 @@ import base64
 import re
 import time
 import random
+import socket
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from googlenewsdecoder import gnewsdecoder
+
+# Set default socket timeout to prevent indefinite hanging
+socket.setdefaulttimeout(15)
 
 def decode_offline(source_url):
     try:
@@ -27,6 +31,14 @@ def decode_offline(source_url):
         pass
     return None
 
+def gnewsdecoder_with_timeout(url, timeout=8):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(gnewsdecoder, url)
+        try:
+            return future.result(timeout=timeout)
+        except Exception:
+            return {"status": False}
+
 def decode_single(url):
     # 1. Try offline decode first
     offline_url = decode_offline(url)
@@ -38,7 +50,7 @@ def decode_single(url):
         try:
             # Introduce a random delay to prevent rate limits
             time.sleep(random.uniform(0.3, 0.8))
-            decoded = gnewsdecoder(url)
+            decoded = gnewsdecoder_with_timeout(url, timeout=8)
             if decoded.get("status"):
                 return url, decoded["decoded_url"]
             else:
@@ -65,7 +77,9 @@ def main():
                 results[url] = decoded_url
                 
     print(json.dumps(results))
-    sys.exit(0)
+    sys.stdout.flush()
+    import os
+    os._exit(0)
 
 if __name__ == "__main__":
     main()

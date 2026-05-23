@@ -6,6 +6,7 @@ pub mod verifier;
 pub mod evolution;
 pub mod blackboard;
 pub mod tracker;
+pub mod parliament;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::broadcast;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -31,6 +32,7 @@ pub struct RawDocument {
     pub content: String,
     pub raw_language: String,
     pub timestamp: String,
+    pub original_url: Option<String>,
 }
 
 /// An event that has been filtered and classified by the LLM.
@@ -101,6 +103,42 @@ impl PipelineStep {
     }
 }
 
+// ─── Shared JSON Extraction Helpers ─────────────────────────────────────────
+
+/// Extract a JSON array from LLM response text that may contain markdown fences.
+pub fn extract_json_array(text: &str) -> String {
+    if let Some(start) = text.find('[') {
+        if let Some(end) = text.rfind(']') {
+            return text[start..=end].to_string();
+        }
+    }
+    text.to_string()
+}
+
+/// Extract a JSON object from LLM response text that may contain markdown fences.
+pub fn extract_json_object(text: &str) -> String {
+    if let Some(start) = text.find('{') {
+        if let Some(end) = text.rfind('}') {
+            return text[start..=end].to_string();
+        }
+    }
+    text.to_string()
+}
+
+/// Extract either a JSON object or array from LLM response text.
+pub fn extract_json_array_or_object(text: &str) -> String {
+    if let Some(start) = text.find('{') {
+        if let Some(end) = text.rfind('}') {
+            return text[start..=end].to_string();
+        }
+    }
+    if let Some(start) = text.find('[') {
+        if let Some(end) = text.rfind(']') {
+            return text[start..=end].to_string();
+        }
+    }
+    text.to_string()
+}
 /// Incremental pipeline progress emitted after each stage boundary.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineProgress {
@@ -216,41 +254,77 @@ impl DoubaoClient {
             response_format,
         };
 
-        let response = self
-            .client
-            .post(&self.api_url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to send request to LLM API")?;
+        let max_retries = 3u32;
+        let mut last_error = String::new();
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
+        for attempt in 0..max_retries {
+            let response = self
+                .client
+                .post(&self.api_url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&request_body)
+                .send()
+                .await;
+
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = format!("HTTP request failed: {}", e);
+                    if attempt < max_retries - 1 {
+                        let delay = Duration::from_secs(3u64.pow(attempt));
+                        tracing::warn!(attempt = attempt + 1, delay_secs = ?delay, error = %e, "LLM API request failed, retrying...");
+                        sleep(delay).await;
+                        continue;
+                    }
+                    anyhow::bail!("LLM API request failed after {} attempts: {}", max_retries, e);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unable to read error body".to_string());
+                let is_retryable = status.as_u16() == 429 || status.as_u16() >= 500;
+
+                if is_retryable && attempt < max_retries - 1 {
+                    let delay = Duration::from_secs(3u64.pow(attempt));
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        status = %status,
+                        delay_secs = ?delay,
+                        "LLM API returned retryable error, backing off..."
+                    );
+                    sleep(delay).await;
+                    last_error = format!("status {}: {}", status, error_body);
+                    continue;
+                }
+
+                anyhow::bail!(
+                    "LLM API returned status {} after {} attempt(s): {}",
+                    status,
+                    attempt + 1,
+                    error_body
+                );
+            }
+
+            let chat_response: ChatResponse = response
+                .json()
                 .await
-                .unwrap_or_else(|_| "Unable to read error body".to_string());
-            anyhow::bail!(
-                "LLM API returned status {}: {}",
-                status,
-                error_body
-            );
+                .context("Failed to parse LLM API response")?;
+
+            let content = chat_response
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default();
+
+            return Ok(content);
         }
 
-        let chat_response: ChatResponse = response
-            .json()
-            .await
-            .context("Failed to parse LLM API response")?;
-
-        let content = chat_response
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .unwrap_or_default();
-
-        Ok(content)
+        anyhow::bail!("LLM API failed after {} retries: {}", max_retries, last_error)
     }
 }
 
@@ -269,6 +343,8 @@ pub async fn run_pipeline_with_progress<F, Fut>(
     pool: &SqlitePool,
     qdrant: Option<&qdrant_client::Qdrant>,
     force: bool,
+    synthesize_only: bool,
+    hours: Option<u32>,
     mut progress: F,
 ) -> Result<StrategicBriefing>
 where
@@ -281,324 +357,348 @@ where
 
     let doubao = DoubaoClient::new(&config.ark_api_key, &config.ark_endpoint_id, &config.llm_api_url);
 
-    // Step 1: Harvest
-    progress(PipelineProgress {
-        current_step: Some(PipelineStep::Harvester),
-        message: Some("Harvesting RSS feeds and Reddit".to_string()),
-        ..PipelineProgress::default()
-    })
-    .await;
-    tracing::info!("Step 1/5: Harvesting data...");
-    let raw_docs = harvester::harvest_with_progress(&http_client, pool, |p| {
+    let (new_raw_docs, cache_message) = if synthesize_only {
+        (Vec::new(), "Synthesize only mode: loading historical events and bypassing harvester".to_string())
+    } else {
+        // Step 1: Harvest
         progress(PipelineProgress {
             current_step: Some(PipelineStep::Harvester),
-            message: Some(p.message),
-            processed_count: Some(p.processed_count),
-            total_count: Some(p.total_count),
-            output_count: Some(p.output_count),
-            failed_batches: Some(p.failed_count),
-            last_error: p.last_error,
+            message: Some("Harvesting RSS feeds and Reddit".to_string()),
             ..PipelineProgress::default()
         })
-    })
-    .await;
-    tracing::info!(count = raw_docs.len(), "Harvesting complete");
-
-    let (new_raw_docs, _updated_existing_count, cache_message) = if force {
-        if !raw_docs.is_empty() {
-            save_raw_articles(pool, &raw_docs).await?;
-            if let Some(qclient) = qdrant {
-                let collection = &config.qdrant_collection;
-                if let Err(e) = crate::vectordb::store_documents(qclient, collection, &raw_docs, config).await {
-                    tracing::error!(error = %e, "Failed to store raw documents in Qdrant during force scan");
-                }
-            }
-        }
-        let mut cached_docs = load_today_and_yesterday_raw_articles(pool).await?;
-        let mut msg_prefix = "Force rescan: processing today and yesterday's news";
-        if cached_docs.is_empty() {
-            cached_docs = load_recent_raw_articles(pool, 100).await?;
-            msg_prefix = "Force rescan: no recent news found, fallback to loading 100 recent articles";
-        }
-        let message = format!("{} (loaded {} articles)", msg_prefix, cached_docs.len());
-        (cached_docs, 0, message)
-    } else if raw_docs.is_empty() {
-        if let Ok(Some(briefing)) = get_latest_briefing_from_db(pool).await {
+        .await;
+        tracing::info!("Step 1/5: Harvesting data...");
+        let raw_docs = harvester::harvest_with_progress(&http_client, pool, hours, |p: harvester::HarvestProgress| {
             progress(PipelineProgress {
-                current_step: Some(PipelineStep::Synthesizer),
-                raw_count: Some(count_raw_articles(pool).await.unwrap_or(0)),
-                analyzed_count: Some(briefing.events.len()),
-                verified_count: Some(briefing.events.len()),
-                message: Some("No new articles found; loaded latest briefing from database".to_string()),
+                current_step: Some(PipelineStep::Harvester),
+                message: Some(p.message),
+                processed_count: Some(p.processed_count),
+                total_count: Some(p.total_count),
+                output_count: Some(p.output_count),
+                failed_batches: Some(p.failed_count),
+                last_error: p.last_error,
                 ..PipelineProgress::default()
             })
-            .await;
-            tracing::info!("No new raw documents; returning latest briefing from database");
-            return Ok(briefing);
-        }
+        })
+        .await;
+        tracing::info!(count = raw_docs.len(), "Harvesting complete");
 
-        let mut cached_docs = load_today_and_yesterday_raw_articles(pool).await?;
-        let mut msg_prefix = "No new articles found; continuing from today and yesterday's news";
-        if cached_docs.is_empty() {
-            cached_docs = load_recent_raw_articles(pool, 100).await?;
-            msg_prefix = "No new articles found; fallback to loading 100 recent articles";
-        }
-        let message = format!("{} (loaded {} articles)", msg_prefix, cached_docs.len());
-        (cached_docs, 0, message)
-    } else {
-        let updated_existing_count =
-            update_existing_raw_articles_if_content_longer(pool, &raw_docs).await?;
-
-        // Identify new documents in a single batch check
-        let urls_to_check: Vec<String> = raw_docs.iter().map(|d| d.source_url.clone()).collect();
-        let new_urls = filter_new_urls(pool, &urls_to_check).await;
-        let mut new_raw_docs = Vec::new();
-        for doc in &raw_docs {
-            if new_urls.contains(&doc.source_url) {
-                new_raw_docs.push(doc.clone());
-            }
-        }
-
-        tracing::info!(
-            total = raw_docs.len(),
-            new_count = new_raw_docs.len(),
-            updated_existing_count,
-            "De-duplicated raw documents against database cache"
-        );
-
-        // Save only new articles to SQLite and Qdrant
-        if !new_raw_docs.is_empty() {
-            save_raw_articles(pool, &new_raw_docs).await?;
-
-            if let Some(qclient) = qdrant {
-                let collection = &config.qdrant_collection;
-                if let Err(e) =
-                    crate::vectordb::store_documents(qclient, collection, &new_raw_docs, config)
-                        .await
-                {
-                    tracing::error!(error = %e, "Failed to store raw documents in Qdrant");
+        let (docs, _updated_existing_count, cache_msg) = if force {
+            if !raw_docs.is_empty() {
+                save_raw_articles(pool, &raw_docs).await?;
+                if let Some(qclient) = qdrant {
+                    let collection = &config.qdrant_collection;
+                    if let Err(e) = crate::vectordb::store_documents(qclient, collection, &raw_docs, config).await {
+                        tracing::error!(error = %e, "Failed to store raw documents in Qdrant during force scan");
+                    }
                 }
             }
-        }
+            let cached_docs = load_today_and_yesterday_raw_articles(pool).await?;
+            let message = format!("Force rescan: processing today and yesterday's news (loaded {} articles)", cached_docs.len());
+            (cached_docs, 0, message)
+        } else if raw_docs.is_empty() {
+            if let Ok(Some(briefing)) = get_latest_briefing_from_db(pool).await {
+                progress(PipelineProgress {
+                    current_step: Some(PipelineStep::Synthesizer),
+                    raw_count: Some(count_raw_articles(pool).await.unwrap_or(0)),
+                    analyzed_count: Some(briefing.events.len()),
+                    verified_count: Some(briefing.events.len()),
+                    message: Some("No new articles found; loaded latest briefing from database".to_string()),
+                    ..PipelineProgress::default()
+                })
+                .await;
+                tracing::info!("No new raw documents; returning latest briefing from database");
+                return Ok(briefing);
+            }
 
-        let mut today_yesterday_docs = load_today_and_yesterday_raw_articles(pool).await?;
-        let mut msg_prefix = "Processing today and yesterday's news";
-        if today_yesterday_docs.is_empty() {
-            today_yesterday_docs = new_raw_docs.clone();
-            msg_prefix = "No today/yesterday cached news; processing newly harvested articles";
-        }
+            let cached_docs = load_unprocessed_today_and_yesterday_raw_articles(pool).await?;
+            let message = format!("No new articles found; continuing from unprocessed today and yesterday's news (loaded {} articles)", cached_docs.len());
+            (cached_docs, 0, message)
+        } else {
+            let updated_existing_count =
+                update_existing_raw_articles_if_content_longer(pool, &raw_docs).await?;
 
-        let message = format!(
-            "{} (loaded {} articles); updated {} existing articles with longer content",
-            msg_prefix,
-            today_yesterday_docs.len(),
-            updated_existing_count
-        );
-        (today_yesterday_docs, updated_existing_count, message)
+            // Identify new documents in a single batch check
+            let urls_to_check: Vec<String> = raw_docs.iter().map(|d| d.source_url.clone()).collect();
+            let new_urls = filter_new_urls(pool, &urls_to_check).await;
+            let mut new_raw_docs = Vec::new();
+            for doc in &raw_docs {
+                if new_urls.contains(&doc.source_url) {
+                    new_raw_docs.push(doc.clone());
+                }
+            }
+
+            tracing::info!(
+                total = raw_docs.len(),
+                new_count = new_raw_docs.len(),
+                updated_existing_count,
+                "De-duplicated raw documents against database cache"
+            );
+
+            // Save only new articles to SQLite and Qdrant
+            if !new_raw_docs.is_empty() {
+                save_raw_articles(pool, &new_raw_docs).await?;
+
+                if let Some(qclient) = qdrant {
+                    let collection = &config.qdrant_collection;
+                    if let Err(e) =
+                        crate::vectordb::store_documents(qclient, collection, &new_raw_docs, config)
+                            .await
+                    {
+                        tracing::error!(error = %e, "Failed to store raw documents in Qdrant");
+                    }
+                }
+            }
+
+            let mut today_yesterday_docs = load_unprocessed_today_and_yesterday_raw_articles(pool).await?;
+            let mut msg_prefix = "Processing unprocessed today and yesterday's news";
+            if today_yesterday_docs.is_empty() {
+                let mut filtered_new_docs = new_raw_docs.clone();
+                let threshold_date = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+                filtered_new_docs.retain(|doc| {
+                    if doc.timestamp.len() >= 10 {
+                        let doc_date = &doc.timestamp[0..10];
+                        doc_date >= threshold_date.as_str()
+                    } else {
+                        false
+                    }
+                });
+                today_yesterday_docs = filtered_new_docs;
+                msg_prefix = "No today/yesterday cached unprocessed news; processing newly harvested today/yesterday articles";
+            }
+
+            let message = format!(
+                "{} (loaded {} articles); updated {} existing articles with longer content",
+                msg_prefix,
+                today_yesterday_docs.len(),
+                updated_existing_count
+            );
+            (today_yesterday_docs, updated_existing_count, message)
+        };
+        (docs, cache_msg)
     };
 
-    if new_raw_docs.is_empty() {
-        tracing::warn!("No new raw documents harvested after de-duplication");
-        if let Ok(Some(briefing)) = get_latest_briefing_from_db(pool).await {
-            tracing::info!("Returning latest briefing from database");
-            return Ok(briefing);
-        }
-        
-        let briefing = StrategicBriefing {
-            id: Uuid::new_v4().to_string(),
-            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-            overview: "今日未采集到新的珠宝行业新闻，且没有历史简报。".to_string(),
-            heatmap: HashMap::new(),
-            events: Vec::new(),
-            recommendations: vec!["持续监控各市场动态。".to_string()],
-        };
-        save_briefing(pool, &briefing).await?;
-        return Ok(briefing);
-    }
-
-    // Now, run the Blackboard Multi-Agent System!
-    tracing::info!("Initializing Blackboard MAS for {} raw documents", new_raw_docs.len());
-    
-    let blackboard = Arc::new(blackboard::Blackboard::new());
-    
-    // Set initial work count for Raw articles
-    blackboard.increment_work(new_raw_docs.len());
-
-    // Spawn agent task runners in parallel!
-    let config_arc = Arc::new(config.clone());
-    
-    // Subscribe receivers first to avoid tokio::sync::broadcast race conditions
-    let gatekeeper_rx = blackboard.tx.subscribe();
-    let dedup_rx = blackboard.tx.subscribe();
-    let analyst_rx = blackboard.tx.subscribe();
-    let peer_rx = blackboard.tx.subscribe();
-    let critic_rx = blackboard.tx.subscribe();
-    let refiner_rx = blackboard.tx.subscribe();
-
-    // 1. Gatekeeper Task
-    let gatekeeper_bb = blackboard.clone();
-    let gatekeeper_client = doubao.clone();
-    let gatekeeper_pool = pool.clone();
-    let gatekeeper_config = config_arc.clone();
-    tokio::spawn(async move {
-        blackboard::start_gatekeeper(gatekeeper_bb, gatekeeper_rx, gatekeeper_client, gatekeeper_pool, gatekeeper_config).await;
-    });
-
-    // 2. De-duplicator Task (Re-enabled with Qdrant client support!)
-    let dedup_bb = blackboard.clone();
-    let dedup_pool = pool.clone();
-    let dedup_qdrant = qdrant.cloned();
-    let dedup_config = config_arc.clone();
-    tokio::spawn(async move {
-        blackboard::start_deduplicator(dedup_bb, dedup_rx, dedup_pool, dedup_qdrant, dedup_config).await;
-    });
-
-    // 3. Analyst Coordinator Task
-    let analyst_bb = blackboard.clone();
-    let analyst_client = doubao.clone();
-    let analyst_pool = pool.clone();
-    tokio::spawn(async move {
-        blackboard::start_analyst_coordinator(analyst_bb, analyst_rx, analyst_client, analyst_pool).await;
-    });
-
-    // 4. Peer Reviewer Task
-    let peer_bb = blackboard.clone();
-    let peer_client = doubao.clone();
-    let peer_pool = pool.clone();
-    tokio::spawn(async move {
-        blackboard::start_peer_reviewer(peer_bb, peer_rx, peer_client, peer_pool).await;
-    });
-
-    // 5. Critic Task
-    let critic_bb = blackboard.clone();
-    let critic_client = doubao.clone();
-    let critic_pool = pool.clone();
-    tokio::spawn(async move {
-        blackboard::start_critic(critic_bb, critic_rx, critic_client, critic_pool).await;
-    });
-
-    // 6. Refiner (and Real-time Evolution) Task
-    let refiner_bb = blackboard.clone();
-    let refiner_client = doubao.clone();
-    let refiner_pool = pool.clone();
-    tokio::spawn(async move {
-        blackboard::start_refiner(refiner_bb, refiner_rx, refiner_client, refiner_pool).await;
-    });
-
-    // Coordinator & Progress Reporter Loop on main thread
-    let mut rx = blackboard.tx.subscribe();
-    
-    // Broadcast all raw articles to kick off the pipeline!
-    for doc in &new_raw_docs {
-        let _ = blackboard.tx.send(blackboard::AgentMessage::RawArticleAdded(doc.clone()));
-    }
-    let _ = blackboard.tx.send(blackboard::AgentMessage::AllScoutingDone);
 
     let mut consensus_events = Vec::new();
-    let mut raw_processed = 0;
-    let mut events_filtered = 0;
-    let mut events_analyzed = 0;
-    let mut events_verified = 0;
-    let mut evolutions_run = 0;
 
-    progress(PipelineProgress {
-        current_step: Some(PipelineStep::Filter),
-        raw_count: Some(new_raw_docs.len()),
-        processed_count: Some(0),
-        total_count: Some(new_raw_docs.len()),
-        message: Some(cache_message),
-        ..PipelineProgress::default()
-    })
-    .await;
+    if !new_raw_docs.is_empty() {
+        // Now, run the Blackboard Multi-Agent System!
+        tracing::info!("Initializing Blackboard MAS for {} raw documents", new_raw_docs.len());
+        
+        let blackboard = Arc::new(blackboard::Blackboard::new());
+        
+        // Set initial work count for Raw articles
+        blackboard.increment_work(new_raw_docs.len());
 
-    // Loop until active_count reaches 0
-    loop {
-        let count = blackboard.active_count.load(Ordering::SeqCst);
-        if count == 0 {
-            tracing::info!("Blackboard active work count reached 0, completing orchestration loop");
-            break;
+        // Spawn agent task runners in parallel!
+        let config_arc = Arc::new(config.clone());
+        
+        // Subscribe receivers first to avoid tokio::sync::broadcast race conditions
+        let gatekeeper_rx = blackboard.tx.subscribe();
+        let dedup_rx = blackboard.tx.subscribe();
+        let analyst_rx = blackboard.tx.subscribe();
+        let peer_rx = blackboard.tx.subscribe();
+        let critic_rx = blackboard.tx.subscribe();
+        let refiner_rx = blackboard.tx.subscribe();
+
+        // 1. Gatekeeper Task
+        let gatekeeper_bb = blackboard.clone();
+        let gatekeeper_client = doubao.clone();
+        let gatekeeper_pool = pool.clone();
+        let gatekeeper_config = config_arc.clone();
+        tokio::spawn(async move {
+            blackboard::start_gatekeeper(gatekeeper_bb, gatekeeper_rx, gatekeeper_client, gatekeeper_pool, gatekeeper_config).await;
+        });
+
+        // 2. De-duplicator Task (Re-enabled with Qdrant client support!)
+        let dedup_bb = blackboard.clone();
+        let dedup_pool = pool.clone();
+        let dedup_qdrant = qdrant.cloned();
+        let dedup_config = config_arc.clone();
+        tokio::spawn(async move {
+            blackboard::start_deduplicator(dedup_bb, dedup_rx, dedup_pool, dedup_qdrant, dedup_config).await;
+        });
+
+        // 3. Analyst Coordinator Task
+        let analyst_bb = blackboard.clone();
+        let analyst_client = doubao.clone();
+        let analyst_pool = pool.clone();
+        tokio::spawn(async move {
+            blackboard::start_analyst_coordinator(analyst_bb, analyst_rx, analyst_client, analyst_pool).await;
+        });
+
+        // 4. Peer Reviewer Task
+        let peer_bb = blackboard.clone();
+        let peer_client = doubao.clone();
+        let peer_pool = pool.clone();
+        tokio::spawn(async move {
+            blackboard::start_peer_reviewer(peer_bb, peer_rx, peer_client, peer_pool).await;
+        });
+
+        // 5. Critic Task
+        let critic_bb = blackboard.clone();
+        let critic_client = doubao.clone();
+        let critic_pool = pool.clone();
+        tokio::spawn(async move {
+            blackboard::start_critic(critic_bb, critic_rx, critic_client, critic_pool).await;
+        });
+
+        // 6. Refiner (and Real-time Evolution) Task
+        let refiner_bb = blackboard.clone();
+        let refiner_client = doubao.clone();
+        let refiner_pool = pool.clone();
+        tokio::spawn(async move {
+            blackboard::start_refiner(refiner_bb, refiner_rx, refiner_client, refiner_pool).await;
+        });
+
+        // Coordinator & Progress Reporter Loop on main thread
+        let mut rx = blackboard.tx.subscribe();
+        
+        // Broadcast all raw articles to kick off the pipeline!
+        for doc in &new_raw_docs {
+            let _ = blackboard.tx.send(blackboard::AgentMessage::RawArticleAdded(doc.clone()));
         }
+        let _ = blackboard.tx.send(blackboard::AgentMessage::AllScoutingDone);
 
-        tokio::select! {
-            msg_res = rx.recv() => {
-                match msg_res {
-                    Ok(blackboard::AgentMessage::RawArticleAdded(_)) => {
-                        raw_processed += 1;
-                        let msg = format!("MAS Blackboard: Processing raw article {} / {}", raw_processed, new_raw_docs.len());
-                        progress(PipelineProgress {
-                            current_step: Some(PipelineStep::Filter),
-                            processed_count: Some(raw_processed),
-                            total_count: Some(new_raw_docs.len()),
-                            message: Some(msg),
-                            ..PipelineProgress::default()
-                        }).await;
+        let mut raw_processed = 0;
+        let mut events_filtered = 0;
+        let mut events_analyzed = 0;
+        let mut events_verified = 0;
+        let mut evolutions_run = 0;
+
+        progress(PipelineProgress {
+            current_step: Some(PipelineStep::Filter),
+            raw_count: Some(new_raw_docs.len()),
+            processed_count: Some(0),
+            total_count: Some(new_raw_docs.len()),
+            message: Some(cache_message),
+            ..PipelineProgress::default()
+        })
+        .await;
+
+        // Loop until active_count reaches 0
+        loop {
+            let count = blackboard.active_count.load(Ordering::SeqCst);
+            if count == 0 {
+                tracing::info!("Blackboard active work count reached 0, completing orchestration loop");
+                break;
+            }
+
+            tokio::select! {
+                msg_res = rx.recv() => {
+                    match msg_res {
+                        Ok(blackboard::AgentMessage::RawArticleAdded(_)) => {
+                            raw_processed += 1;
+                            let msg = format!("MAS Blackboard: Processing raw article {} / {}", raw_processed, new_raw_docs.len());
+                            progress(PipelineProgress {
+                                current_step: Some(PipelineStep::Filter),
+                                processed_count: Some(raw_processed),
+                                total_count: Some(new_raw_docs.len()),
+                                message: Some(msg),
+                                ..PipelineProgress::default()
+                            }).await;
+                        }
+                        Ok(blackboard::AgentMessage::FilteredEventAdded(event)) => {
+                            events_filtered += 1;
+                            let msg = format!("MAS Blackboard: Filtered and classified event: '{}'", event.title);
+                            progress(PipelineProgress {
+                                current_step: Some(PipelineStep::Analyst),
+                                filtered_count: Some(events_filtered),
+                                message: Some(msg),
+                                ..PipelineProgress::default()
+                            }).await;
+                        }
+                        Ok(blackboard::AgentMessage::AnalysisCompleted(event)) => {
+                            events_analyzed += 1;
+                            let msg = format!("MAS Blackboard: Domain analysis completed for: '{}'", event.title);
+                            progress(PipelineProgress {
+                                current_step: Some(PipelineStep::Verifier),
+                                analyzed_count: Some(events_analyzed),
+                                message: Some(msg),
+                                ..PipelineProgress::default()
+                            }).await;
+                        }
+                        Ok(blackboard::AgentMessage::ConsensusReached(event)) => {
+                            events_verified += 1;
+                            consensus_events.push(event.clone());
+                            let msg = format!("MAS Blackboard: Fact-check consensus reached for event: '{}'", event.title);
+                            progress(PipelineProgress {
+                                current_step: Some(PipelineStep::Verifier),
+                                verified_count: Some(events_verified),
+                                message: Some(msg),
+                                ..PipelineProgress::default()
+                            }).await;
+                        }
+                        Ok(blackboard::AgentMessage::PlaybookUpdated { role_id, new_guidelines }) => {
+                            evolutions_run += 1;
+                            tracing::info!(role = %role_id, "Main orchestrator received playbook update event");
+                            let msg = format!("MAS Blackboard: Mutated rules for '{}' (Total mutations: {}) -> {}", role_id, evolutions_run, new_guidelines);
+                            progress(PipelineProgress {
+                                current_step: Some(PipelineStep::Verifier),
+                                message: Some(msg),
+                                ..PipelineProgress::default()
+                            }).await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::warn!("Orchestrator broadcast channel closed unexpectedly");
+                            break;
+                        }
+                        _ => {}
                     }
-                    Ok(blackboard::AgentMessage::FilteredEventAdded(event)) => {
-                        events_filtered += 1;
-                        let msg = format!("MAS Blackboard: Filtered and classified event: '{}'", event.title);
-                        progress(PipelineProgress {
-                            current_step: Some(PipelineStep::Analyst),
-                            filtered_count: Some(events_filtered),
-                            message: Some(msg),
-                            ..PipelineProgress::default()
-                        }).await;
-                    }
-                    Ok(blackboard::AgentMessage::AnalysisCompleted(event)) => {
-                        events_analyzed += 1;
-                        let msg = format!("MAS Blackboard: Domain analysis completed for: '{}'", event.title);
-                        progress(PipelineProgress {
-                            current_step: Some(PipelineStep::Verifier),
-                            analyzed_count: Some(events_analyzed),
-                            message: Some(msg),
-                            ..PipelineProgress::default()
-                        }).await;
-                    }
-                    Ok(blackboard::AgentMessage::ConsensusReached(event)) => {
-                        events_verified += 1;
-                        consensus_events.push(event.clone());
-                        let msg = format!("MAS Blackboard: Fact-check consensus reached for event: '{}'", event.title);
-                        progress(PipelineProgress {
-                            current_step: Some(PipelineStep::Verifier),
-                            verified_count: Some(events_verified),
-                            message: Some(msg),
-                            ..PipelineProgress::default()
-                        }).await;
-                    }
-                    Ok(blackboard::AgentMessage::PlaybookUpdated { role_id, new_guidelines }) => {
-                        evolutions_run += 1;
-                        tracing::info!(role = %role_id, "Main orchestrator received playbook update event");
-                        let msg = format!("MAS Blackboard: Mutated rules for '{}' (Total mutations: {}) -> {}", role_id, evolutions_run, new_guidelines);
-                        progress(PipelineProgress {
-                            current_step: Some(PipelineStep::Verifier),
-                            message: Some(msg),
-                            ..PipelineProgress::default()
-                        }).await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::warn!("Orchestrator broadcast channel closed unexpectedly");
+                }
+                _ = sleep(Duration::from_millis(100)) => {
+                    // Periodically check if idle count reached 0 in case broadcast gets missed
+                    if blackboard.active_count.load(Ordering::SeqCst) == 0 {
                         break;
                     }
-                    _ => {}
-                }
-            }
-            _ = sleep(Duration::from_millis(100)) => {
-                // Periodically check if idle count reached 0 in case broadcast gets missed
-                if blackboard.active_count.load(Ordering::SeqCst) == 0 {
-                    break;
                 }
             }
         }
+    } else {
+        tracing::info!("No unprocessed raw documents to process in Blackboard MAS.");
+        progress(PipelineProgress {
+            current_step: Some(PipelineStep::Filter),
+            raw_count: Some(0),
+            processed_count: Some(0),
+            total_count: Some(0),
+            message: Some("Skipping Blackboard MAS: no unprocessed raw documents".to_string()),
+            ..PipelineProgress::default()
+        })
+        .await;
     }
 
     // Step 5: Synthesize briefing
-    tracing::info!("Step 5/5: Synthesizing strategic briefing from {} consensus events...", consensus_events.len());
+    // First, load historical events from today and yesterday, and merge with new consensus events.
+    let mut all_events_map: HashMap<String, AnalyzedEvent> = HashMap::new();
+    
+    // Load historical events from today and yesterday
+    match load_today_and_yesterday_events(pool).await {
+        Ok(hist_events) => {
+            tracing::info!("Loaded {} historical events from today/yesterday to merge", hist_events.len());
+            for ev in hist_events {
+                all_events_map.insert(ev.id.clone(), ev);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to load historical events from database: {}", e);
+        }
+    }
+    
+    // Merge new consensus events, overwriting historical duplicates if any
+    for ev in consensus_events {
+        all_events_map.insert(ev.id.clone(), ev);
+    }
+    
+    let merged_events: Vec<AnalyzedEvent> = all_events_map.into_values().collect();
+
+    tracing::info!("Step 5/5: Synthesizing strategic briefing from {} merged events...", merged_events.len());
     progress(PipelineProgress {
         current_step: Some(PipelineStep::Synthesizer),
-        verified_count: Some(consensus_events.len()),
-        processed_count: Some(consensus_events.len()),
-        total_count: Some(consensus_events.len()),
-        output_count: Some(consensus_events.len()),
-        message: Some(format!("Synthesizing final daily strategic briefing from {} consensus events", consensus_events.len())),
+        verified_count: Some(merged_events.len()),
+        processed_count: Some(merged_events.len()),
+        total_count: Some(merged_events.len()),
+        output_count: Some(merged_events.len()),
+        message: Some(format!("Synthesizing final daily strategic briefing from {} merged events", merged_events.len())),
         ..PipelineProgress::default()
     })
     .await;
@@ -608,7 +708,7 @@ where
         tracing::error!("Final all-agent feedback evolution pass failed: {}", e);
     }
 
-    let briefing = if consensus_events.is_empty() {
+    let briefing = if merged_events.is_empty() {
         StrategicBriefing {
             id: Uuid::new_v4().to_string(),
             date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
@@ -618,11 +718,11 @@ where
             recommendations: vec!["持续监控各市场动态。".to_string()],
         }
     } else {
-        synthesizer::synthesize_briefing(&doubao, pool, &consensus_events).await?
+        synthesizer::synthesize_briefing(&doubao, pool, &merged_events).await?
     };
 
     // Audit the synthesized briefing quality
-    if !consensus_events.is_empty() {
+    if !merged_events.is_empty() {
         if let Err(e) = synthesizer::audit_briefing(&doubao, pool, &briefing).await {
             tracing::error!("Briefing quality audit failed: {}", e);
         }
@@ -649,6 +749,21 @@ where
         tracing::error!(error = %e, "Failed to run prospective tracking on daily briefing events");
     }
 
+    // Mark the newly processed raw articles as processed in database
+    if !new_raw_docs.is_empty() {
+        if let Err(e) = mark_raw_articles_processed(pool, &new_raw_docs).await {
+            tracing::error!("Failed to mark raw articles as processed: {}", e);
+        }
+    }
+
+    // Trigger Agent Parliament Stagnation Audit and Probation Checks
+    if let Err(e) = parliament::run_stagnation_audit(pool, &doubao).await {
+        tracing::error!("Parliament stagnation audit failed: {}", e);
+    }
+    if let Err(e) = parliament::check_probation_agents(pool).await {
+        tracing::error!("Parliament probation check failed: {}", e);
+    }
+
     progress(PipelineProgress {
         current_step: Some(PipelineStep::Synthesizer),
         message: Some("Pipeline MAS complete!".to_string()),
@@ -665,12 +780,15 @@ where
 async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()> {
     for doc in docs {
         let id = Uuid::new_v4().to_string();
+        let orig_url = doc.original_url.as_deref().unwrap_or(&doc.source_url);
+        let res_url = doc.original_url.as_ref().map(|_| &doc.source_url);
         sqlx::query(
-            r#"INSERT OR IGNORE INTO raw_articles (id, source_url, title, content, raw_language, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT OR IGNORE INTO raw_articles (id, source_url, resolved_url, title, content, raw_language, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&id)
-        .bind(&doc.source_url)
+        .bind(orig_url)
+        .bind(res_url)
         .bind(&doc.title)
         .bind(&doc.content)
         .bind(&doc.raw_language)
@@ -682,6 +800,21 @@ async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()
     tracing::info!(count = docs.len(), "Raw articles saved");
     Ok(())
 }
+
+async fn mark_raw_articles_processed(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()> {
+    for doc in docs {
+        let orig_url = doc.original_url.as_deref().unwrap_or(&doc.source_url);
+        sqlx::query("UPDATE raw_articles SET pipeline_status = 'processed' WHERE source_url = ? OR resolved_url = ?")
+            .bind(orig_url)
+            .bind(&doc.source_url)
+            .execute(pool)
+            .await
+            .context("Failed to mark raw article as processed")?;
+    }
+    tracing::info!(count = docs.len(), "Marked raw articles as processed");
+    Ok(())
+}
+
 
 async fn update_existing_raw_articles_if_content_longer(
     pool: &SqlitePool,
@@ -697,11 +830,12 @@ async fn update_existing_raw_articles_if_content_longer(
         let result = sqlx::query(
             r#"UPDATE raw_articles
                SET title = ?, content = ?, raw_language = ?
-               WHERE source_url = ? AND length(content) < ?"#,
+               WHERE (source_url = ? OR resolved_url = ?) AND length(content) < ?"#,
         )
         .bind(&doc.title)
         .bind(&doc.content)
         .bind(&doc.raw_language)
+        .bind(&doc.source_url)
         .bind(&doc.source_url)
         .bind(content_len)
         .execute(pool)
@@ -725,9 +859,10 @@ async fn count_raw_articles(pool: &SqlitePool) -> Result<usize> {
     Ok(count.max(0) as usize)
 }
 
+#[allow(dead_code)]
 async fn load_recent_raw_articles(pool: &SqlitePool, limit: i64) -> Result<Vec<RawDocument>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        r#"SELECT source_url, title, content, raw_language, created_at
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
+        r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
            FROM raw_articles
            ORDER BY created_at DESC
            LIMIT ?"#,
@@ -739,8 +874,9 @@ async fn load_recent_raw_articles(pool: &SqlitePool, limit: i64) -> Result<Vec<R
 
     Ok(rows
         .into_iter()
-        .map(|(source_url, title, content, raw_language, timestamp)| RawDocument {
-            source_url,
+        .map(|(source_url, resolved_url, title, content, raw_language, timestamp)| RawDocument {
+            original_url: resolved_url.as_ref().map(|_| source_url.clone()),
+            source_url: resolved_url.unwrap_or(source_url),
             title,
             content,
             raw_language,
@@ -749,21 +885,25 @@ async fn load_recent_raw_articles(pool: &SqlitePool, limit: i64) -> Result<Vec<R
         .collect())
 }
 
+#[allow(dead_code)]
 async fn load_today_and_yesterday_raw_articles(pool: &SqlitePool) -> Result<Vec<RawDocument>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        r#"SELECT source_url, title, content, raw_language, created_at
+    let threshold = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
+        r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
            FROM raw_articles
-           WHERE date(created_at) >= date('now', '-1 day')
+           WHERE date(created_at) >= ?
            ORDER BY created_at DESC"#,
     )
+    .bind(&threshold)
     .fetch_all(pool)
     .await
     .context("Failed to load today and yesterday's raw articles")?;
 
     Ok(rows
         .into_iter()
-        .map(|(source_url, title, content, raw_language, timestamp)| RawDocument {
-            source_url,
+        .map(|(source_url, resolved_url, title, content, raw_language, timestamp)| RawDocument {
+            original_url: resolved_url.as_ref().map(|_| source_url.clone()),
+            source_url: resolved_url.unwrap_or(source_url),
             title,
             content,
             raw_language,
@@ -772,13 +912,72 @@ async fn load_today_and_yesterday_raw_articles(pool: &SqlitePool) -> Result<Vec<
         .collect())
 }
 
+async fn load_unprocessed_today_and_yesterday_raw_articles(pool: &SqlitePool) -> Result<Vec<RawDocument>> {
+    let threshold = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
+        r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
+           FROM raw_articles
+           WHERE date(created_at) >= ? AND (pipeline_status IS NULL OR pipeline_status <> 'processed')
+           ORDER BY created_at DESC"#,
+    )
+    .bind(&threshold)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load unprocessed today and yesterday's raw articles")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(source_url, resolved_url, title, content, raw_language, timestamp)| RawDocument {
+            original_url: resolved_url.as_ref().map(|_| source_url.clone()),
+            source_url: resolved_url.unwrap_or(source_url),
+            title,
+            content,
+            raw_language,
+            timestamp,
+        })
+        .collect())
+}
+
+#[allow(dead_code)]
+async fn load_unprocessed_recent_raw_articles(pool: &SqlitePool, limit: i64) -> Result<Vec<RawDocument>> {
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
+        r#"SELECT source_url, resolved_url, title, content, raw_language, created_at
+           FROM raw_articles
+           WHERE pipeline_status IS NULL OR pipeline_status <> 'processed'
+           ORDER BY created_at DESC
+           LIMIT ?"#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load cached unprocessed raw articles")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(source_url, resolved_url, title, content, raw_language, timestamp)| RawDocument {
+            original_url: resolved_url.as_ref().map(|_| source_url.clone()),
+            source_url: resolved_url.unwrap_or(source_url),
+            title,
+            content,
+            raw_language,
+            timestamp,
+        })
+        .collect())
+}
+
+
 async fn save_briefing(pool: &SqlitePool, briefing: &StrategicBriefing) -> Result<()> {
     let heatmap_json = serde_json::to_string(&briefing.heatmap)?;
     let recommendations_json = serde_json::to_string(&briefing.recommendations)?;
 
     sqlx::query(
-        r#"INSERT OR REPLACE INTO briefings (id, date, overview, heatmap_json, recommendations_json)
-           VALUES (?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO briefings (id, date, overview, heatmap_json, recommendations_json)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             date = excluded.date,
+             overview = excluded.overview,
+             heatmap_json = excluded.heatmap_json,
+             recommendations_json = excluded.recommendations_json"#,
     )
     .bind(&briefing.id)
     .bind(&briefing.date)
@@ -794,27 +993,48 @@ async fn save_briefing(pool: &SqlitePool, briefing: &StrategicBriefing) -> Resul
 }
 
 async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEvent]) -> Result<()> {
-    for event in events {
-        let source_urls_json = serde_json::to_string(&event.source_urls)?;
+    for (position, event) in events.iter().enumerate() {
+        let filtered_urls: Vec<String> = event
+            .source_urls
+            .iter()
+            .filter(|url| !url.contains("news.google.com"))
+            .cloned()
+            .collect();
+        let source_urls_json = serde_json::to_string(&filtered_urls)?;
         
-        // Find the earliest created_at timestamp among the source URLs in raw_articles
+        // Find the created_at timestamp of the first source URL that exists in raw_articles
         let mut created_at_val = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        if let Some(first_url) = event.source_urls.first() {
-            if let Ok(Some(row)) = sqlx::query!(
-                "SELECT created_at FROM raw_articles WHERE source_url = ? LIMIT 1",
-                first_url
+        for url in &filtered_urls {
+            if let Ok(Some(ts)) = sqlx::query_scalar::<_, String>(
+                "SELECT created_at FROM raw_articles WHERE source_url = ? OR resolved_url = ? LIMIT 1"
             )
+            .bind(url)
+            .bind(url)
             .fetch_optional(pool)
             .await
             {
-                created_at_val = row.created_at;
+                created_at_val = ts;
+                break;
             }
         }
 
         sqlx::query(
-            r#"INSERT OR REPLACE INTO events
+            r#"INSERT INTO events
                (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 market = excluded.market,
+                 category = excluded.category,
+                 title = excluded.title,
+                 summary = excluded.summary,
+                 impact_type = excluded.impact_type,
+                 severity = excluded.severity,
+                 urgency = excluded.urgency,
+                 confidence = excluded.confidence,
+                 source_urls = excluded.source_urls,
+                 briefing_id = COALESCE(excluded.briefing_id, events.briefing_id),
+                 analysis = excluded.analysis,
+                 created_at = excluded.created_at"#,
         )
         .bind(&event.id)
         .bind(&event.market)
@@ -832,6 +1052,17 @@ async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEve
         .execute(pool)
         .await
         .context("Failed to save event")?;
+
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO briefing_events (briefing_id, event_id, position)
+               VALUES (?, ?, ?)"#,
+        )
+        .bind(briefing_id)
+        .bind(&event.id)
+        .bind(position as i64)
+        .execute(pool)
+        .await
+        .context("Failed to save briefing event snapshot link")?;
     }
     tracing::info!(count = events.len(), "Events saved to database");
     Ok(())
@@ -849,7 +1080,12 @@ async fn get_latest_briefing_from_db(pool: &SqlitePool) -> Result<Option<Strateg
         let recommendations = serde_json::from_str(&recommendations_json).unwrap_or_default();
 
         let event_rows = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64, i64, String, String)>(
-            "SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis FROM events WHERE briefing_id = ?"
+            r#"SELECT e.id, e.market, e.category, e.title, e.summary, e.impact_type,
+                      e.severity, e.urgency, e.confidence, e.source_urls, e.analysis
+               FROM events e
+               JOIN briefing_events be ON be.event_id = e.id
+               WHERE be.briefing_id = ?
+               ORDER BY be.position ASC, e.severity DESC, e.urgency DESC"#
         )
         .bind(&id)
         .fetch_all(pool)
@@ -887,6 +1123,41 @@ async fn get_latest_briefing_from_db(pool: &SqlitePool) -> Result<Option<Strateg
         Ok(None)
     }
 }
+
+async fn load_today_and_yesterday_events(pool: &SqlitePool) -> Result<Vec<AnalyzedEvent>> {
+    let threshold = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64, i64, String, String)>(
+        r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
+           FROM events
+           WHERE date(created_at) >= ?
+           ORDER BY created_at DESC"#,
+    )
+    .bind(&threshold)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load today and yesterday's events")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis)| {
+            let urls = serde_json::from_str(&source_urls).unwrap_or_default();
+            AnalyzedEvent {
+                id,
+                market,
+                category,
+                title,
+                summary,
+                source_urls: urls,
+                impact_type,
+                severity: severity as i32,
+                urgency: urgency as i32,
+                confidence: confidence as i32,
+                analysis,
+            }
+        })
+        .collect())
+}
+
 
 /// Perform semantic de-duplication of events within the current batch.
 /// Clusters events using cosine similarity (threshold = 0.82) on text embeddings.
@@ -950,7 +1221,7 @@ pub async fn deduplicate_events(
 }
 
 /// Helper function to perform bulk URL verification.
-async fn filter_new_urls(pool: &sqlx::SqlitePool, urls: &[String]) -> std::collections::HashSet<String> {
+pub async fn filter_new_urls(pool: &sqlx::SqlitePool, urls: &[String]) -> std::collections::HashSet<String> {
     if urls.is_empty() {
         return std::collections::HashSet::new();
     }
@@ -1063,4 +1334,3 @@ pub async fn get_agent_prompt(pool: &sqlx::SqlitePool, role_id: &str, default_pr
         default_prompt.to_string()
     }
 }
-

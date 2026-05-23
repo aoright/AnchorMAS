@@ -4,13 +4,12 @@ function formatTimestamp(ts) {
   if (!ts) return '--'
   try {
     const d = new Date(ts)
-    return d.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    })
+    const year = d.getFullYear()
+    const month = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const hour = String(d.getHours()).padStart(2, '0')
+    const minute = String(d.getMinutes()).padStart(2, '0')
+    return `${year}-${month}-${day} ${hour}:${minute}`
   } catch {
     return ts
   }
@@ -34,6 +33,8 @@ export default function RawDataView({ articles, loading, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null)
   const [langFilter, setLangFilter] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchHours, setSearchHours] = useState('24')
+  const [searchStatus, setSearchStatus] = useState('idle')
 
   const data = articles || []
 
@@ -52,6 +53,26 @@ export default function RawDataView({ articles, loading, onRefresh }) {
 
   const toggleExpand = (id) => {
     setExpandedId(expandedId === id ? null : id)
+  }
+
+  const handleTriggerSearch = async () => {
+    setSearchStatus('searching')
+    try {
+      const res = await fetch(`/api/scan?hours=${searchHours}`, { method: 'POST' })
+      if (res.ok || res.status === 202) {
+        setSearchStatus('triggered')
+        alert('新闻搜索/扫描已在后台启动！您可以切换到 Pipeline 标签页查看实时分析进度。')
+        setTimeout(() => setSearchStatus('idle'), 5000)
+      } else {
+        setSearchStatus('error')
+        alert('触发新闻搜索失败')
+        setTimeout(() => setSearchStatus('idle'), 3000)
+      }
+    } catch (err) {
+      setSearchStatus('error')
+      alert(`连接后端失败: ${err.message}`)
+      setTimeout(() => setSearchStatus('idle'), 3000)
+    }
   }
 
   if (loading) {
@@ -85,6 +106,29 @@ export default function RawDataView({ articles, loading, onRefresh }) {
           Refresh
         </button>
 
+        <span style={{ margin: '0 8px', color: 'var(--color-border)' }}>|</span>
+
+        <select
+          className="input"
+          value={searchHours}
+          onChange={(e) => setSearchHours(e.target.value)}
+          style={{ width: 140 }}
+        >
+          <option value="24">最近 24 小时</option>
+          <option value="48">最近 48 小时</option>
+          <option value="72">最近 72 小时</option>
+          <option value="168">最近 7 天</option>
+          <option value="720">最近 30 天</option>
+        </select>
+
+        <button
+          className="btn btn--primary btn--sm"
+          onClick={handleTriggerSearch}
+          disabled={searchStatus === 'searching'}
+        >
+          {searchStatus === 'searching' ? 'Searching...' : '搜集最新新闻'}
+        </button>
+
         <span className="toolbar-count">
           Showing {filtered.length} of {data.length} articles
         </span>
@@ -93,7 +137,7 @@ export default function RawDataView({ articles, loading, onRefresh }) {
       {filtered.length === 0 ? (
         <div className="empty-state">
           {data.length === 0
-            ? "No raw data available. Click 'Trigger Scan' to start harvesting."
+            ? "No raw data available. Open Pipeline and run a scan to start harvesting."
             : 'No articles match the current filters.'}
         </div>
       ) : (

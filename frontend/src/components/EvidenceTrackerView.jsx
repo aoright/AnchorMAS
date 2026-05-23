@@ -91,7 +91,7 @@ export default function EvidenceTrackerView() {
       <div className="empty-state">
         <h3>暂无证据追踪事件</h3>
         <p style={{ marginTop: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
-          您可以在“Briefing (每日简报)”选项卡中，点击新闻事件旁边的星标（⭐）进行收藏。<br />
+          您可以在“Briefing (每日简报)”选项卡中，点击新闻事件旁边的 Track 按钮进行收藏。<br />
           系统会自动提取关键特征并追溯该新闻的历史前因（Past）以及追踪未来的后续进展（Future）。
         </p>
       </div>
@@ -195,7 +195,7 @@ export default function EvidenceTrackerView() {
                           <span className={`timeline-badge ${badgeClass}`}>{badgeText}</span>
                           {!isCurrent && (
                             <span className="match-score-badge">
-                              {Math.round(item.match_score * 100)}% 相似度
+                              {(item.match_score * 100).toFixed(2)}% 相似度
                             </span>
                           )}
                         </div>

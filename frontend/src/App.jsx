@@ -5,6 +5,7 @@ import PipelineView from './components/PipelineView'
 import BriefingView from './components/BriefingView'
 import EvidenceTrackerView from './components/EvidenceTrackerView'
 import AgentEvolutionCenter from './components/AgentEvolutionCenter'
+import AgentParliament from './components/AgentParliament'
 
 const TABS = [
   { id: 'raw', label: 'Raw Data' },
@@ -12,6 +13,7 @@ const TABS = [
   { id: 'briefing', label: 'Briefing' },
   { id: 'tracker', label: 'Evidence Tracker' },
   { id: 'evolution', label: 'Agent Evolution' },
+  { id: 'parliament', label: 'Agent Parliament' },
 ]
 
 export default function App() {
@@ -19,7 +21,7 @@ export default function App() {
   const [articles, setArticles] = useState([])
   const [loadingArticles, setLoadingArticles] = useState(false)
   const [backendStatus, setBackendStatus] = useState('checking')
-  const [scanStatus, setScanStatus] = useState('idle')
+  const [loadStatus, setLoadStatus] = useState('idle')
 
   const fetchArticles = useCallback(async () => {
     setLoadingArticles(true)
@@ -54,32 +56,24 @@ export default function App() {
     checkBackend()
   }, [fetchArticles, checkBackend])
 
-  const handleTriggerScan = async () => {
-    setScanStatus('running')
+  const handleLoadData = async () => {
+    setLoadStatus('loading')
     try {
-      const res = await fetch('/api/scan', { method: 'POST' })
-      if (res.ok || res.status === 202) {
-        setScanStatus('triggered')
-        setTimeout(() => {
-          setScanStatus('idle')
-          fetchArticles()
-        }, 3000)
-      } else {
-        setScanStatus('error')
-        setTimeout(() => setScanStatus('idle'), 3000)
-      }
+      await Promise.all([fetchArticles(), checkBackend()])
+      setLoadStatus('loaded')
+      setTimeout(() => setLoadStatus('idle'), 1500)
     } catch {
-      setScanStatus('error')
-      setTimeout(() => setScanStatus('idle'), 3000)
+      setLoadStatus('error')
+      setTimeout(() => setLoadStatus('idle'), 2000)
     }
   }
 
-  const scanButtonLabel = () => {
-    switch (scanStatus) {
-      case 'running': return 'Scanning...'
-      case 'triggered': return 'Loaded / Triggered'
-      case 'error': return 'Scan Failed'
-      default: return 'Load / Scan'
+  const loadButtonLabel = () => {
+    switch (loadStatus) {
+      case 'loading': return 'Loading...'
+      case 'loaded': return 'Loaded'
+      case 'error': return 'Load Failed'
+      default: return 'Load Data'
     }
   }
 
@@ -89,11 +83,11 @@ export default function App() {
         <h1>AIRS - Market Intelligence Agent</h1>
         <div className="app-header-actions">
           <button
-            className={`btn ${scanStatus === 'idle' ? 'btn--primary' : ''}`}
-            onClick={handleTriggerScan}
-            disabled={scanStatus !== 'idle'}
+            className={`btn ${loadStatus === 'idle' ? 'btn--primary' : ''}`}
+            onClick={handleLoadData}
+            disabled={loadStatus !== 'idle'}
           >
-            {scanButtonLabel()}
+            {loadButtonLabel()}
           </button>
         </div>
       </header>
@@ -122,6 +116,7 @@ export default function App() {
         {activeTab === 'briefing' && <BriefingView />}
         {activeTab === 'tracker' && <EvidenceTrackerView />}
         {activeTab === 'evolution' && <AgentEvolutionCenter />}
+        {activeTab === 'parliament' && <AgentParliament />}
       </main>
 
       <footer className="app-footer">

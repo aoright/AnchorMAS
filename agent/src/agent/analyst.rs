@@ -4,6 +4,7 @@ use super::{AnalyzedEvent, DoubaoClient, FilteredEvent};
 
 /// Analyze filtered events with specialized analyst prompts per category.
 /// Runs analysis for each category using domain-specific expertise.
+#[allow(dead_code)]
 pub async fn analyze_events(
     client: &DoubaoClient,
     pool: &sqlx::SqlitePool,
@@ -221,6 +222,7 @@ fn get_analyst_prompt(category: &str) -> String {
 }
 
 
+#[allow(dead_code)]
 async fn analyze_category(
     client: &DoubaoClient,
     system_prompt: &str,
@@ -342,21 +344,11 @@ fn parse_analysis_results(
 }
 
 fn extract_json_array(text: &str) -> String {
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text.rfind(']') {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
+    super::extract_json_array(text)
 }
 
 fn extract_json_object(text: &str) -> String {
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
+    super::extract_json_object(text)
 }
 
 pub async fn ensure_analyst_exists(
@@ -401,15 +393,17 @@ pub async fn ensure_analyst_exists(
 1. 分析特工的主要职责是评估该领域内的新闻事件对珠宝企业的商业决策价值（包括判断影响类型：Opportunity/Risk/Attention，打出严重度、紧急度与置信度分数 1-5 分，并给出专业深度分析）。
 2. 在系统提示词中，融入该细分珠宝领域的商业逻辑与专业分析维度（例如若领域为“Auction”，提示词应强调苏富比/佳士得拍卖成交价、彩钻投资级估值、古董珠宝流转及收藏家情绪）。
 3. 必须继承统一的打分规则（Opportunity/Risk/Attention 以及 1-5 评分定义）。
+4. 请同时为该分析特工量身定做 2-3 条精炼的【初始业务进化守则】（initial_guidelines），例如防脑补规则、特定的数值判断边界或分析底线（必须以 - 开头的 Markdown 列表格式，每条规则不超过50字）。
 
 请直接以 JSON 格式输出设计成果，无需任何 Markdown 外壳或解释：
 {
   "name": "特工名称（如：收藏与拍卖分析特工）",
-  "system_prompt": "设计的完整系统提示词文本"
+  "system_prompt": "设计的完整系统提示词文本",
+  "initial_guidelines": "- 守则1...\n- 守则2..."
 }"#).await;
 
     let user_prompt = format!(
-        "请为新检测到的珠宝细分分析领域：【{}】设计一个专属的分析特工。请在 system_prompt 中包含针对这个领域特有视角的业务关注重点及商业逻辑，并融入标准的Opportunity/Risk/Attention以及1-5分量化打分逻辑。",
+        "请为新检测到的珠宝细分分析领域：【{}】设计一个专属的分析特工。请在 system_prompt 中包含针对这个领域特有视角的业务关注重点及商业逻辑，并融入标准的Opportunity/Risk/Attention以及1-5分量化打分逻辑。同时设计 2-3 条该细分领域的 initial_guidelines。",
         category
     );
 
@@ -428,6 +422,11 @@ pub async fn ensure_analyst_exists(
     let system_prompt = design_val.get("system_prompt")
         .and_then(|v| v.as_str())
         .context("Designer output missing system_prompt field")?
+        .to_string();
+
+    let initial_guidelines = design_val.get("initial_guidelines")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
         .to_string();
 
     // Validate designed prompt
@@ -464,17 +463,21 @@ pub async fn ensure_analyst_exists(
     // Persist to agent_playbook
     sqlx::query(
         r#"INSERT INTO agent_playbook (role_id, name, system_prompt, guidelines, version)
-           VALUES (?, ?, ?, '', 1)
-           ON CONFLICT(role_id) DO UPDATE SET name = excluded.name, system_prompt = excluded.system_prompt"#
+           VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT(role_id) DO UPDATE SET name = excluded.name, system_prompt = excluded.system_prompt,
+           guidelines = CASE WHEN agent_playbook.guidelines = '' OR agent_playbook.guidelines IS NULL THEN excluded.guidelines ELSE agent_playbook.guidelines END"#
     )
     .bind(&role_id)
     .bind(&name)
     .bind(&system_prompt)
+    .bind(&initial_guidelines)
     .execute(pool)
     .await
     .context("Failed to insert custom designed agent into playbook")?;
 
-    tracing::info!("Successfully created and registered new custom agent: {} ({})", name, role_id);
+    let _ = super::parliament::register_new_playbook_agent(pool, &role_id).await;
+
+    tracing::info!("Successfully created and registered new custom agent: {} ({}) with initial guidelines: {:?}", name, role_id, initial_guidelines);
     
     Ok((role_id, name))
 }
@@ -502,6 +505,11 @@ pub async fn analyze_single_event(
     );
 
     let response = client.chat(&system_prompt, &user_prompt, true).await?;
+
+    // Charge credits:
+    let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, &role_id, tokens as i64).await;
+
     let mut analysis_results = parse_analysis_results(&response, &[event])?;
     if let Some(res) = analysis_results.pop() {
         Ok(res)
@@ -517,17 +525,33 @@ pub async fn peer_review_event(
     peer_role_id: &str,
 ) -> Result<String> {
     let peer_role_name = match peer_role_id {
-        "analyst_competition" => "竞争动态分析特工",
-        "analyst_product" => "产品趋势分析特工",
-        "analyst_platform" => "渠道政策分析特工",
-        "analyst_regulation" => "行业合规分析特工",
-        _ => "社会舆情分析特工",
+        "analyst_competition" => "竞争动态分析特工".to_string(),
+        "analyst_product" => "产品趋势分析特工".to_string(),
+        "analyst_platform" => "渠道政策分析特工".to_string(),
+        "analyst_regulation" => "行业合规分析特工".to_string(),
+        "analyst_social" => "社会舆情分析特工".to_string(),
+        other => {
+            let name_opt: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM agent_playbook WHERE role_id = ?"
+            )
+            .bind(other)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or_default();
+            name_opt.unwrap_or_else(|| {
+                if other.starts_with("analyst_") {
+                    format!("{} 细分分析特工", &other[8..].to_uppercase())
+                } else {
+                    other.to_string()
+                }
+            })
+        }
     };
     
     let default_prompt = format!(
         "你是一个高级珠宝行业分析师（角色：【{}】）。\n\
          你需要对另一位分析师关于【{}】领域的报告进行同行评审（Peer Review）。\n\
-         请根据原始事件摘要和主分析师的结论，提出你的跨领域见解、补充意见或事实逻辑质疑。\n\
+         请根据原始事件摘要 and 主分析师的结论，提出你的跨领域见解、补充意见或事实逻辑质疑。\n\
          字数控制在100字以内，内容务必针对性强且客观。\n\
          不要返回任何 Markdown 格式，只返回纯文本点评。",
         peer_role_name, event.category
@@ -541,6 +565,10 @@ pub async fn peer_review_event(
     );
 
     let response = client.chat(&system_prompt, &user_prompt, false).await?;
+
+    // Charge credits:
+    let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, peer_role_id, tokens as i64).await;
+
     Ok(response.trim().to_string())
 }
-

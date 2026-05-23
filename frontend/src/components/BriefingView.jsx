@@ -79,8 +79,17 @@ function getMarketData(overviewObj, key) {
   return null
 }
 
+function formatSnapshotLabel(item) {
+  const date = item.date || 'Undated'
+  const createdAt = item.created_at || '--'
+  const count = Number.isFinite(item.event_count) ? item.event_count : 0
+  return `${date} ${createdAt} / ${count} events`
+}
+
 export default function BriefingView() {
   const [briefing, setBriefing] = useState(null)
+  const [briefingHistory, setBriefingHistory] = useState([])
+  const [selectedBriefingId, setSelectedBriefingId] = useState('latest')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [chatMessages, setChatMessages] = useState([])
@@ -90,6 +99,55 @@ export default function BriefingView() {
   const [bookmarks, setBookmarks] = useState([])
   const chatEndRef = useRef(null)
   const [expandedEvents, setExpandedEvents] = useState(new Set())
+  const [reSynthesizing, setReSynthesizing] = useState(false)
+  const [reSynthesizeMessage, setReSynthesizeMessage] = useState('')
+
+  const handleReSynthesize = async () => {
+    setReSynthesizing(true)
+    setReSynthesizeMessage('Starting briefing re-synthesis...')
+    try {
+      const res = await fetch('/api/scan?synthesize_only=true', { method: 'POST' })
+      if (!res.ok && res.status !== 202) {
+        throw new Error(`Server returned ${res.status}`)
+      }
+      
+      let attempts = 0
+      const interval = setInterval(async () => {
+        attempts++
+        if (attempts > 300) {
+          clearInterval(interval)
+          setReSynthesizing(false)
+          alert('重新生成简报超时（超过 5 分钟）')
+          return
+        }
+        try {
+          const statusRes = await fetch('/api/pipeline/status')
+          if (statusRes.ok) {
+            const statusData = await statusRes.json()
+            if (statusData.status === 'completed') {
+              clearInterval(interval)
+              setReSynthesizing(false)
+              // Refresh to load the newly synthesized briefing!
+              const history = await fetchBriefingHistory()
+              await fetchBriefing('latest')
+            } else if (statusData.status === 'error') {
+              clearInterval(interval)
+              setReSynthesizing(false)
+              alert(`重新生成简报失败: ${statusData.error_message || '未知错误'}`)
+            } else {
+              const msg = statusData.progress?.message || '正在合成战略简报...'
+              setReSynthesizeMessage(msg)
+            }
+          }
+        } catch (err) {
+          console.error('Error polling pipeline status', err)
+        }
+      }, 1000)
+    } catch (err) {
+      setReSynthesizing(false)
+      alert(`无法触发重新生成简报: ${err.message}`)
+    }
+  }
 
   const toggleExpandEvent = (eventId) => {
     setExpandedEvents((prev) => {
@@ -115,17 +173,43 @@ export default function BriefingView() {
     }
   }, [])
 
-  const fetchBriefing = useCallback(async () => {
+  const fetchBriefingHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/briefings')
+      if (!res.ok) {
+        setBriefingHistory([])
+        return []
+      }
+      const data = await res.json()
+      const items = Array.isArray(data) ? data : data.items || []
+      setBriefingHistory(items)
+      return items
+    } catch (err) {
+      console.error('Failed to fetch briefing history', err)
+      setBriefingHistory([])
+      return []
+    }
+  }, [])
+
+  const fetchBriefing = useCallback(async (briefingId = 'latest') => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/briefing/latest')
+      const endpoint = briefingId && briefingId !== 'latest'
+        ? `/api/briefings/${encodeURIComponent(briefingId)}`
+        : '/api/briefing/latest'
+      const res = await fetch(endpoint)
       if (res.status === 404) {
         setBriefing(null)
         setError('No briefings available. Run a scan first to generate a briefing.')
       } else if (res.ok) {
         const data = await res.json()
         setBriefing(data)
+        setSelectedBriefingId(data.id || briefingId || 'latest')
+        setActiveMarket('Global')
+        setExpandedEvents(new Set())
+        setChatMessages([])
+        setChatInput('')
         await fetchBookmarks()
       } else {
         setBriefing(null)
@@ -138,6 +222,23 @@ export default function BriefingView() {
       setLoading(false)
     }
   }, [fetchBookmarks])
+
+  const handleBriefingChange = (event) => {
+    const nextId = event.target.value
+    setSelectedBriefingId(nextId)
+    fetchBriefing(nextId)
+  }
+
+  const handleRefreshBriefings = async () => {
+    const prevHistory = briefingHistory
+    const nextHistory = await fetchBriefingHistory()
+    const isViewingLatest = !briefing || prevHistory.length === 0 || selectedBriefingId === 'latest' || selectedBriefingId === prevHistory[0].id
+    if (isViewingLatest) {
+      await fetchBriefing('latest')
+    } else {
+      await fetchBriefing(selectedBriefingId || 'latest')
+    }
+  }
 
   const handleToggleBookmark = async (eventId) => {
     const existing = bookmarks.find((b) => b.event_id === eventId)
@@ -215,8 +316,9 @@ export default function BriefingView() {
   }
 
   useEffect(() => {
+    fetchBriefingHistory()
     fetchBriefing()
-  }, [fetchBriefing])
+  }, [fetchBriefing, fetchBriefingHistory])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -276,7 +378,7 @@ export default function BriefingView() {
   if (error || !briefing) {
     return (
       <div className="empty-state">
-        {error || "No briefings available. Click 'Trigger Scan' to generate one."}
+        {error || "No briefings available. Open Pipeline and run a scan to generate one."}
         <div style={{ marginTop: 12 }}>
           <button className="btn btn--sm" onClick={fetchBriefing}>Retry</button>
         </div>
@@ -337,9 +439,60 @@ export default function BriefingView() {
         const activeKey = activeMarket.toLowerCase()
         return evMarket === activeKey
       })
+  const selectedSnapshot = briefingHistory.find((item) => item.id === selectedBriefingId)
+  const savedSnapshotCount = briefingHistory.length
 
   return (
     <div>
+      <div className="briefing-toolbar">
+        <div className="briefing-selector">
+          <label htmlFor="briefing-snapshot">Briefing Snapshot</label>
+          <select
+            id="briefing-snapshot"
+            className="input briefing-select"
+            value={selectedBriefingId}
+            onChange={handleBriefingChange}
+            disabled={briefingHistory.length === 0 || reSynthesizing}
+          >
+            {briefingHistory.length === 0 ? (
+              <option value={selectedBriefingId}>Latest briefing</option>
+            ) : (
+              briefingHistory.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {formatSnapshotLabel(item)}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
+        <div className="briefing-meta">
+          <span>Generated: {briefing.created_at || selectedSnapshot?.created_at || '--'}</span>
+          <span>Events: {rawEvents.length}</span>
+          <span>Saved snapshots: {savedSnapshotCount}</span>
+        </div>
+        <button className="btn btn--sm" onClick={handleRefreshBriefings} disabled={reSynthesizing}>
+          Refresh
+        </button>
+        <button 
+          className="btn btn--primary btn--sm" 
+          onClick={handleReSynthesize} 
+          disabled={reSynthesizing}
+          style={{ marginLeft: 8 }}
+        >
+          {reSynthesizing ? 'Re-synthesizing...' : '重新生成简报'}
+        </button>
+      </div>
+
+      {reSynthesizing && (
+        <div className="info-box info-box--surface" style={{ marginBottom: 16, borderLeft: '4px solid var(--color-blue)', padding: '12px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span className="status-dot status-dot--blue" />
+            <div style={{ fontWeight: 600, fontSize: 13 }}>重新生成简报中:</div>
+            <div style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>{reSynthesizeMessage}</div>
+          </div>
+        </div>
+      )}
+
       {/* Market Selector Tabs */}
       <div className="tab-nav" style={{ marginBottom: 20 }}>
         {MARKETS.map((m) => (
@@ -507,7 +660,7 @@ export default function BriefingView() {
                       <td><span className={`label ${severityClass(evt.urgency)}`}>{evt.urgency}</span></td>
                       <td className="text-mono text-sm">
                         {evt.confidence != null
-                          ? (evt.confidence > 1 ? evt.confidence : `${Math.round(evt.confidence * 100)}%`)
+                          ? evt.confidence.toFixed(2)
                           : '--'}
                       </td>
                       <td className="text-sm" onClick={(e) => e.stopPropagation()}>

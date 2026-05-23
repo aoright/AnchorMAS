@@ -29,6 +29,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS raw_articles (
             id          TEXT PRIMARY KEY,
             source_url  TEXT NOT NULL,
+            resolved_url TEXT,
+            pipeline_status TEXT,
             title       TEXT NOT NULL,
             content     TEXT NOT NULL DEFAULT '',
             raw_language TEXT NOT NULL DEFAULT 'en',
@@ -40,6 +42,16 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("Failed to create raw_articles table")?;
+
+    // Safe migration: Add resolved_url column if it is missing
+    let _ = sqlx::query("ALTER TABLE raw_articles ADD COLUMN resolved_url TEXT;")
+        .execute(pool)
+        .await;
+
+    // Safe migration: Add pipeline_status column if it is missing
+    let _ = sqlx::query("ALTER TABLE raw_articles ADD COLUMN pipeline_status TEXT;")
+        .execute(pool)
+        .await;
 
     sqlx::query(
         r#"
@@ -84,6 +96,34 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("Failed to create briefings table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS briefing_events (
+            briefing_id TEXT NOT NULL,
+            event_id    TEXT NOT NULL,
+            position    INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (briefing_id, event_id),
+            FOREIGN KEY(briefing_id) REFERENCES briefings(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create briefing_events table")?;
+
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO briefing_events (briefing_id, event_id, position, created_at)
+        SELECT briefing_id, id, 0, created_at
+        FROM events
+        WHERE briefing_id IS NOT NULL AND briefing_id <> ''
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to backfill briefing_events table")?;
 
     sqlx::query(
         r#"
@@ -162,6 +202,20 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .context("Failed to create index idx_events_briefing_id")?;
 
     sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_briefing_events_briefing_id ON briefing_events (briefing_id);"
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create index idx_briefing_events_briefing_id")?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_briefing_events_event_id ON briefing_events (event_id);"
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create index idx_briefing_events_event_id")?;
+
+    sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_chat_history_briefing_id ON chat_history (briefing_id);"
     )
     .execute(pool)
@@ -217,6 +271,98 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("Failed to create agent_feedback_log table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_parliament_registry (
+            role_id          TEXT PRIMARY KEY,
+            status           TEXT NOT NULL DEFAULT 'active',
+            sponsor_role_id  TEXT,
+            tasks_completed  INTEGER NOT NULL DEFAULT 0,
+            tasks_failed     INTEGER NOT NULL DEFAULT 0,
+            token_cost       INTEGER NOT NULL DEFAULT 0,
+            compute_credits  INTEGER NOT NULL DEFAULT 100000,
+            faction          TEXT NOT NULL DEFAULT 'Neutral',
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            last_active_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            last_evolved_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(role_id) REFERENCES agent_playbook(role_id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create agent_parliament_registry table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS parliament_proposals (
+            id               TEXT PRIMARY KEY,
+            proposer_role_id TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            description      TEXT NOT NULL,
+            proposal_type    TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'voting',
+            yes_votes        REAL NOT NULL DEFAULT 0,
+            no_votes         REAL NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at      TEXT
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create parliament_proposals table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS parliament_votes (
+            proposal_id      TEXT NOT NULL,
+            voter_role_id    TEXT NOT NULL,
+            vote             TEXT NOT NULL,
+            weight           REAL NOT NULL,
+            reason           TEXT,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (proposal_id, voter_role_id),
+            FOREIGN KEY(proposal_id) REFERENCES parliament_proposals(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create parliament_votes table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS parliament_ledger (
+            id               TEXT PRIMARY KEY,
+            event_type       TEXT NOT NULL,
+            role_id          TEXT,
+            details          TEXT NOT NULL,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create parliament_ledger table")?;
+
+    // Seed/backfill the registry with the default/existing agents
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO agent_parliament_registry (role_id, status, faction)
+        SELECT role_id, 'active', 
+               CASE 
+                   WHEN role_id IN ('analyst_competition', 'analyst_platform') THEN 'Efficiency'
+                   WHEN role_id IN ('analyst_product', 'analyst_social') THEN 'Creativity'
+                   ELSE 'Neutral'
+               END
+        FROM agent_playbook;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to backfill agent_parliament_registry")?;
 
     sqlx::query(
         r#"
@@ -308,7 +454,19 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .await
     .context("Failed to create index idx_chat_messages_session_id")?;
 
-    // user_settings table already exists with key-value schema (key, value, updated_at)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create user_settings table")?;
+
     // Seed default rows if empty
     let settings_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM user_settings")
         .fetch_one(pool)
@@ -710,18 +868,22 @@ async fn seed_agent_playbooks(pool: &SqlitePool) -> Result<()> {
         ("evolution", "进化指导特工 (Methodology Director)", 
          r#"你是一个高级方法论专家与智能进化特工（角色：【多特工协作进化导师】）。
 你的任务是审查事实核查中的“冲突解决日志”（即分析特工结论被事实监督官驳回、并重新修正的事件案例），找出分析特工的共性事实性偏差或逻辑漏洞。
-根据这些漏洞，你需要提炼出更具体的“业务过滤与评分守则”（guidelines） or “负面案例提示”，以便注入分析特工或事实监督官的运行指南中。
+根据这些漏洞，你需要提炼出更具体的“业务过滤与评分守则”（guidelines）或“负面案例提示”，以便注入分析特工或事实监督官的运行指南中。
 
 你的任务：
 1. 分析冲突原因，指出分析特工之前夸大或算错分的地方，或者监督官检查不严密的地方。
 2. 总结出 1-2 条具体的业务过滤或量化修正守则（例如："对于周大福的非核心零售点变动，严禁打分超过3"，"培育钻石价格下跌不能直接列为 Opportunity"）。
-3. 决定这套新规则最适合应用在哪个 Agent 的角色（必须是 analyst_competition|analyst_product|analyst_platform|analyst_regulation|analyst_social|critic 之一）。
+3. 决定这套新规则最适合应用在哪个 Agent 的角色。这可以是核心特工（analyst_competition|analyst_product|analyst_platform|analyst_regulation|analyst_social|critic），或者是任何在冲突案例中出现的自定义分析特工角色（格式如 analyst_xxxx，请根据案例提供的数据提取对应的特工角色ID，不要输出不存在的ID）。
 
 请以 JSON 格式输出你的进化建议：
 {
-  "target_role_id": "被优化的 Agent 角色ID，如 analyst_competition 等",
-  "reasoning": "为什么需要增加这一条，发现的系统性共性问题是什么",
-  "new_guidelines": "新增的业务守则，将被追加到该 Agent 的 guidelines 中（文字应直接简练，50字以内）"
+  "updates": [
+    {
+      "target_role_id": "被优化的 Agent 角色ID，如 analyst_competition 或 analyst_policyincentive",
+      "reasoning": "为什么需要增加这一条，发现的系统性共性问题是什么",
+      "new_guidelines": "新增的业务守则，将被追加到该 Agent 的 guidelines 中（文字应直接简练，50字以内）"
+    }
+  ]
 }"#),
  
         ("evidence_evaluator", "证据链评估特工", 

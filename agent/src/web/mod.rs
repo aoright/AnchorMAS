@@ -74,7 +74,7 @@ impl PipelineStatus {
 
         if let Some((briefing_id, created_at)) = latest_briefing {
             let event_count = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM events WHERE briefing_id = ?",
+                "SELECT COUNT(*) FROM briefing_events WHERE briefing_id = ?",
             )
             .bind(&briefing_id)
             .fetch_one(pool)
@@ -134,7 +134,24 @@ pub struct AppState {
 
 /// Build the Axum router with all routes and middleware.
 pub fn build_router(state: AppState) -> Router {
-    let cors = CorsLayer::permissive();
+    let cors = {
+        let origins = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
+            "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173".to_string()
+        });
+        if origins == "*" {
+            CorsLayer::permissive()
+        } else {
+            use axum::http::HeaderValue;
+            let allowed: Vec<HeaderValue> = origins
+                .split(',')
+                .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(allowed)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any)
+        }
+    };
 
     Router::new()
         // ── Dashboard API (existing) ────────────────────────────────────
@@ -142,6 +159,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pipeline/status", axum::routing::get(handlers::get_pipeline_status))
         .route("/api/briefing/latest", axum::routing::get(handlers::get_latest_briefing))
         .route("/api/briefings", axum::routing::get(handlers::list_briefings))
+        .route("/api/briefings/:id", axum::routing::get(handlers::get_briefing_by_id))
         .route("/api/scan", axum::routing::post(handlers::trigger_scan))
         .route("/api/chat", axum::routing::post(handlers::chat))
         .route("/api/search", axum::routing::post(handlers::search_vectors))
@@ -151,6 +169,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/bookmarks", axum::routing::post(handlers::post_bookmark).get(handlers::get_bookmarks))
         .route("/api/bookmarks/:id", axum::routing::delete(handlers::delete_bookmark))
         .route("/api/bookmarks/:id/evidence-chain", axum::routing::get(handlers::get_evidence_chain))
+        // ── Agent Parliament API ────────────────────────────────────────
+        .route("/api/parliament/registry", axum::routing::get(handlers::get_parliament_registry))
+        .route("/api/parliament/ledger", axum::routing::get(handlers::get_parliament_ledger))
+        .route("/api/parliament/proposals", axum::routing::get(handlers::list_proposals).post(handlers::create_proposal))
+        .route("/api/parliament/proposals/:id/vote", axum::routing::post(handlers::vote_on_proposal))
+        .route("/api/parliament/trial", axum::routing::post(handlers::trigger_parliament_trial))
+        .route("/api/parliament/distribute", axum::routing::post(handlers::distribute_compute_credits))
+        .route("/api/parliament/crossover", axum::routing::post(handlers::trigger_crossover))
         // ── App Frontend API (new) ──────────────────────────────────────
         // News
         .route("/app/news", axum::routing::get(app_handlers::list_news))
@@ -166,7 +192,7 @@ pub fn build_router(state: AppState) -> Router {
         // Bookmarks
         .route("/app/bookmarks", axum::routing::get(app_handlers::list_bookmarks).post(app_handlers::create_bookmark))
         .route("/app/bookmarks/:id", axum::routing::delete(app_handlers::delete_bookmark))
-        .route("/app/bookmarks/:id/evidence", axum::routing::get(app_handlers::get_evidence_chain))
+        .route("/app/bookmarks/:id/chain", axum::routing::get(app_handlers::get_evidence_chain))
         // Settings
         .route("/app/settings", axum::routing::get(app_handlers::get_settings).put(app_handlers::update_settings))
         // TTS
@@ -174,4 +200,3 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
         .with_state(state)
 }
-

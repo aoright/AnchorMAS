@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{broadcast, Notify};
 use tokio::time::{sleep, Duration};
-use anyhow::Result;
 
 use crate::config::Config;
 use super::{
@@ -12,6 +11,7 @@ use super::{
 };
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AgentMessage {
     RawArticleAdded(RawDocument),
     FilteredEventAdded(FilteredEvent),
@@ -48,7 +48,7 @@ pub struct Blackboard {
 
 impl Blackboard {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(1000);
+        let (tx, _) = broadcast::channel(2000);
         Self {
             tx,
             active_count: Arc::new(AtomicUsize::new(0)),
@@ -107,9 +107,21 @@ impl Blackboard {
     }
 
     pub fn decrement_work(&self) {
-        let prev = self.active_count.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
-            self.idle_notify.notify_one();
+        loop {
+            let current = self.active_count.load(Ordering::SeqCst);
+            if current == 0 {
+                tracing::error!("BUG: decrement_work called when active_count is already 0, ignoring");
+                return;
+            }
+            match self.active_count.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(prev) => {
+                    if prev == 1 {
+                        self.idle_notify.notify_one();
+                    }
+                    return;
+                }
+                Err(_) => continue, // CAS failed, retry
+            }
         }
     }
 }
@@ -127,6 +139,7 @@ pub async fn start_gatekeeper(
 ) {
     let mut buffer = Vec::new();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
+    let mut spawn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     loop {
         let sleep_fut = sleep(Duration::from_millis(500));
@@ -144,10 +157,11 @@ pub async fn start_gatekeeper(
                             let pool_clone = pool.clone();
                             let config_clone = config.clone();
                             let sem_clone = semaphore.clone();
-                            tokio::spawn(async move {
+                            let handle = tokio::spawn(async move {
                                 let _permit = sem_clone.acquire_owned().await.unwrap();
                                 process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
                             });
+                            spawn_handles.push(handle);
                         }
                     }
                     Ok(AgentMessage::AllScoutingDone) => {
@@ -158,15 +172,16 @@ pub async fn start_gatekeeper(
                             let pool_clone = pool.clone();
                             let config_clone = config.clone();
                             let sem_clone = semaphore.clone();
-                            tokio::spawn(async move {
+                            let handle = tokio::spawn(async move {
                                 let _permit = sem_clone.acquire_owned().await.unwrap();
                                 process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
                             });
+                            spawn_handles.push(handle);
                         }
                         break;
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::warn!("Gatekeeper task lagged behind broadcast channel");
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(dropped = n, "Gatekeeper lagged behind broadcast channel, messages dropped");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
@@ -181,14 +196,20 @@ pub async fn start_gatekeeper(
                 let pool_clone = pool.clone();
                 let config_clone = config.clone();
                 let sem_clone = semaphore.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let _permit = sem_clone.acquire_owned().await.unwrap();
                     process_gatekeeper_batch(&blackboard_clone, &client_clone, &pool_clone, &config_clone, batch).await;
                 });
+                spawn_handles.push(handle);
             }
         }
     }
-    tracing::info!("Gatekeeper task finished scheduling all batches");
+    // Await all in-flight batch tasks to ensure their active_count decrements are completed
+    tracing::info!(in_flight = spawn_handles.len(), "Gatekeeper waiting for in-flight batch tasks to complete");
+    for handle in spawn_handles {
+        let _ = handle.await;
+    }
+    tracing::info!("Gatekeeper task finished, all batches completed");
 }
 
 async fn process_gatekeeper_batch(
@@ -202,6 +223,7 @@ async fn process_gatekeeper_batch(
     tracing::info!("Gatekeeper filtering batch of {} raw documents", batch_len);
     match filter::filter_batch(client, pool, &batch).await {
         Ok(events) => {
+            let _ = super::parliament::log_task_outcome(pool, "filter", true).await;
             tracing::info!("Gatekeeper filtered batch of {}: found {} events", batch_len, events.len());
             // Decrement work count for the raw documents resolved
             for _ in 0..batch_len {
@@ -216,6 +238,7 @@ async fn process_gatekeeper_batch(
             }
         }
         Err(e) => {
+            let _ = super::parliament::log_task_outcome(pool, "filter", false).await;
             tracing::error!("Gatekeeper failed to filter batch of {}: {}", batch_len, e);
             for _ in 0..batch_len {
                 blackboard.decrement_work();
@@ -311,7 +334,9 @@ pub async fn start_deduplicator(
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(dropped = n, "Deduplicator lagged, messages dropped");
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             _ => {}
         }
@@ -363,12 +388,103 @@ pub async fn start_analyst_coordinator(
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(dropped = n, "Analyst coordinator lagged, messages dropped");
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             _ => {}
         }
     }
     tracing::info!("Analyst coordinator task shut down");
+}
+
+pub async fn select_peer_reviewer(
+    pool: &sqlx::SqlitePool,
+    category: &str,
+    event_id: &str,
+) -> String {
+    // 1. Fetch all active analyst role_ids from agent_playbook
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT role_id FROM agent_playbook WHERE role_id LIKE 'analyst_%'"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    if roles.is_empty() {
+        return "analyst_platform".to_string();
+    }
+
+    let target_role_id = format!("analyst_{}", category.to_lowercase());
+
+    // 2. Identify custom roles vs core roles
+    let core_roles = vec![
+        "analyst_competition",
+        "analyst_product",
+        "analyst_platform",
+        "analyst_regulation",
+        "analyst_social",
+    ];
+
+    let custom_roles: Vec<&str> = roles
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|r| !core_roles.contains(r) && *r != target_role_id)
+        .collect();
+
+    // 3. Selection logic:
+    // We want to preserve standard peer reviews for core categories to maintain baseline stability,
+    // but introduce a chance (e.g. 40%) to route them to a custom analyst if one exists.
+    // This allows custom analysts to cross-review and inject specialized knowledge.
+    let use_custom = if !custom_roles.is_empty() {
+        // Use a deterministic seed from event_id so that retries/reruns are stable
+        let mut sum = 0u32;
+        for byte in event_id.bytes() {
+            sum = sum.wrapping_add(byte as u32);
+        }
+        (sum % 10) < 4 // 40% chance
+    } else {
+        false
+    };
+
+    if use_custom && !custom_roles.is_empty() {
+        let mut sum = 0u32;
+        for byte in event_id.bytes() {
+            sum = sum.wrapping_add(byte as u32);
+        }
+        let index = (sum as usize) % custom_roles.len();
+        return custom_roles[index].to_string();
+    }
+
+    // Default static mapping for core categories
+    let default_peer = match category {
+        "Competition" => "analyst_product",
+        "Product" => "analyst_competition",
+        "Platform" => "analyst_social",
+        "Regulation" => "analyst_competition",
+        "Social" => "analyst_platform",
+        _ => {
+            // For custom categories, let them be reviewed by a core analyst or another custom analyst
+            // We can pick a core analyst based on category name hashing
+            let mut sum = 0u32;
+            for byte in category.bytes() {
+                sum = sum.wrapping_add(byte as u32);
+            }
+            let core_idx = (sum as usize) % core_roles.len();
+            core_roles[core_idx]
+        }
+    };
+
+    // Ensure the default peer actually exists in the roles
+    if roles.contains(&default_peer.to_string()) {
+        default_peer.to_string()
+    } else {
+        // Fallback to any core role that exists, or the first role in the list
+        core_roles.iter()
+            .find(|r| roles.contains(&r.to_string()))
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| roles[0].clone())
+    }
 }
 
 /// Peer Analyst Reviewer Task:
@@ -386,19 +502,13 @@ pub async fn start_peer_reviewer(
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
                 tokio::spawn(async move {
-                    // Map primary category to related peer analyst role
-                    let peer_role_id = match event.category.as_str() {
-                        "Competition" => "analyst_product",
-                        "Product" => "analyst_competition",
-                        "Platform" => "analyst_social",
-                        "Regulation" => "analyst_competition",
-                        _ => "analyst_platform", // Social
-                    };
+                    // Map primary category to related peer analyst role dynamically
+                    let peer_role_id = select_peer_reviewer(&pool_clone, &event.category, &event.id).await;
 
                     tracing::info!(event_id = %event.id, peer = %peer_role_id, "Peer reviewer starting cross-domain review");
                     let review_comments = {
                         let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
-                        analyst::peer_review_event(&client_clone, &pool_clone, &event, peer_role_id).await
+                        analyst::peer_review_event(&client_clone, &pool_clone, &event, &peer_role_id).await
                     };
                     let review_comments = match review_comments {
                         Ok(comments) => comments,
@@ -410,12 +520,14 @@ pub async fn start_peer_reviewer(
 
                     let _ = blackboard_clone.tx.send(AgentMessage::PeerReviewCompleted {
                         event,
-                        peer_reviewer: peer_role_id.to_string(),
+                        peer_reviewer: peer_role_id,
                         peer_comments: review_comments,
                     });
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(dropped = n, "Peer reviewer lagged, messages dropped");
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             _ => {}
         }
@@ -433,10 +545,11 @@ pub async fn start_critic(
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::PeerReviewCompleted { event, peer_reviewer: _, peer_comments }) => {
+            Ok(AgentMessage::PeerReviewCompleted { event, peer_reviewer, peer_comments }) => {
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
+                let peer_reviewer_clone = peer_reviewer.clone();
                 tokio::spawn(async move {
                     let doc_content = fetch_raw_content(&pool_clone, &event).await;
                     tracing::info!(event_id = %event.id, "Critic starting pass 1 fact check");
@@ -446,8 +559,13 @@ pub async fn start_critic(
                     };
                     match pass_result {
                         Ok((approved, critique_notes, conf_adj)) => {
+                            let target_analyst = format!("analyst_{}", event.category.to_lowercase());
                             if approved {
                                 tracing::info!(event_id = %event.id, "Critic approved analysis on pass 1");
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &target_analyst, true).await;
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &peer_reviewer_clone, true).await;
+                                let _ = super::parliament::log_task_outcome(&pool_clone, "filter", true).await;
+
                                 let mut final_event = event.clone();
                                 final_event.confidence = conf_adj.clamp(1, 5);
                                 if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
@@ -458,18 +576,29 @@ pub async fn start_critic(
                                 blackboard_clone.decrement_work();
                             } else {
                                 tracing::info!(event_id = %event.id, critique = %critique_notes, "Critic rejected analysis on pass 1, triggering refinement");
-                                
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &target_analyst, false).await;
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &peer_reviewer_clone, false).await;
+
                                 // Write feedback to the target domain analyst
-                                let target_analyst = format!("analyst_{}", event.category.to_lowercase());
                                 log_feedback(&pool_clone, "critic", &target_analyst, Some(&event.id), &critique_notes).await;
+
+                                // Write feedback to the peer reviewer to trigger their co-evolution
+                                let peer_feedback = format!(
+                                    "作为同行评审，在此事件的核查中被判定评审不合格。主分析特工做出了有事实偏差或逻辑矛盾的判断，但你作为同行评审未能指出这些偏差。监督官的核查不通过意见为：{}",
+                                    critique_notes
+                                );
+                                log_feedback(&pool_clone, "critic", &peer_reviewer_clone, Some(&event.id), &peer_feedback).await;
 
                                 // If the document content is empty or contains promotional ad spam, log feedback to filter
                                 if critique_notes.contains("仅") || critique_notes.contains("缺少正文") || critique_notes.contains("广告") || critique_notes.contains("脑补") {
+                                    let _ = super::parliament::log_task_outcome(&pool_clone, "filter", false).await;
                                     let filter_feedback = format!(
                                         "标题：{}。该事件被核查判定为信息极度匮乏或属于广告噪音，过滤特工不应放行。请收紧过滤标准。",
                                         event.title
                                     );
                                     log_feedback(&pool_clone, "critic", "filter", Some(&event.id), &filter_feedback).await;
+                                } else {
+                                    let _ = super::parliament::log_task_outcome(&pool_clone, "filter", true).await;
                                 }
 
                                 let _ = blackboard_clone.tx.send(AgentMessage::VerifierVerdict {
@@ -509,17 +638,22 @@ pub async fn start_critic(
                         Ok((approved, critique_notes, conf_adj)) => {
                             let mut final_event = event.clone();
                             final_event.confidence = conf_adj.clamp(1, 5);
+                            let target_analyst = format!("analyst_{}", event.category.to_lowercase());
                             if !approved {
                                 tracing::warn!(event_id = %event.id, "Critic still rejected analysis on pass 2, proceeding with warnings");
                                 final_event.analysis = format!("{}\n[核查警告] 再次核查仍未完全通过：{}", final_event.analysis, critique_notes);
                                 
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &target_analyst, false).await;
+                                let _ = super::parliament::log_task_outcome(&pool_clone, "refiner", false).await;
+
                                 // Critic still rejected analyst's output on pass 2. Log feedback to all roles to improve coordination.
-                                let target_analyst = format!("analyst_{}", event.category.to_lowercase());
                                 log_feedback(&pool_clone, "critic", &target_analyst, Some(&event.id), &format!("二轮核查失败意见: {}", critique_notes)).await;
                                 log_feedback(&pool_clone, "refiner", "critic", Some(&event.id), "修正特工已针对首轮意见进行修改，但监督官在二轮给出了不同的核查要求或标准过于严苛。建议监督官在首轮给出完整且一致的意见。").await;
                                 log_feedback(&pool_clone, "critic", "refiner", Some(&event.id), &format!("修正特工未能在二轮修改中完全解决首轮提出的核查意见。未通过原因为：{}", critique_notes)).await;
                             } else {
                                 tracing::info!(event_id = %event.id, "Critic approved analysis on pass 2");
+                                let _ = super::parliament::log_task_outcome(&pool_clone, &target_analyst, true).await;
+                                let _ = super::parliament::log_task_outcome(&pool_clone, "refiner", true).await;
                             }
                             if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
                                 final_event.source_urls = urls;
@@ -541,7 +675,9 @@ pub async fn start_critic(
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(dropped = n, "Critic lagged, messages dropped");
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             _ => {}
         }
@@ -552,8 +688,9 @@ pub async fn start_critic(
 async fn fetch_raw_content(pool: &sqlx::SqlitePool, event: &AnalyzedEvent) -> String {
     let source_url = event.source_urls.first().cloned().unwrap_or_default();
     let raw_content: Option<String> = sqlx::query_scalar(
-        "SELECT content FROM raw_articles WHERE source_url = ?"
+        "SELECT content FROM raw_articles WHERE source_url = ? OR resolved_url = ?"
     )
+    .bind(&source_url)
     .bind(&source_url)
     .fetch_optional(pool)
     .await
@@ -621,7 +758,9 @@ pub async fn start_refiner(
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(dropped = n, "Refiner lagged, messages dropped");
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             _ => {}
         }

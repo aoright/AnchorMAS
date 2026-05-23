@@ -114,6 +114,7 @@ pub async fn crawl_web_for_keywords(
                                 content,
                                 raw_language: lang.to_string(),
                                 timestamp: ts,
+                                original_url: None,
                             });
                         }
                     }
@@ -214,9 +215,22 @@ pub async fn save_crawled_event(
     let created_at_val = created_at.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
     let source_urls_json = serde_json::to_string(&event.source_urls)?;
     sqlx::query!(
-        r#"INSERT OR REPLACE INTO events
+        r#"INSERT INTO events
            (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             market = excluded.market,
+             category = excluded.category,
+             title = excluded.title,
+             summary = excluded.summary,
+             impact_type = excluded.impact_type,
+             severity = excluded.severity,
+             urgency = excluded.urgency,
+             confidence = excluded.confidence,
+             source_urls = excluded.source_urls,
+             briefing_id = COALESCE(excluded.briefing_id, events.briefing_id),
+             analysis = excluded.analysis,
+             created_at = excluded.created_at"#,
         event.id,
         event.market,
         event.category,
@@ -254,6 +268,32 @@ pub async fn search_candidate_events(
     let mut candidate_ids = HashSet::new();
     let mut candidates = Vec::new();
 
+    // Expand keywords into shingles (2 and 3 chars for CJK, split by space for English)
+    let mut search_terms = HashSet::new();
+    for kw in keywords {
+        search_terms.insert(kw.clone());
+        let chars: Vec<char> = kw.chars().collect();
+        if chars.iter().any(|c| !c.is_ascii()) {
+            for i in 0..chars.len() {
+                if i + 2 <= chars.len() {
+                    let term: String = chars[i..i+2].iter().collect();
+                    search_terms.insert(term);
+                }
+                if i + 3 <= chars.len() {
+                    let term: String = chars[i..i+3].iter().collect();
+                    search_terms.insert(term);
+                }
+            }
+        } else {
+            for part in kw.split_whitespace() {
+                if part.len() >= 3 {
+                    search_terms.insert(part.to_string());
+                }
+            }
+        }
+    }
+    let search_terms_vec: Vec<String> = search_terms.into_iter().collect();
+
     // 1. Vector similarity search in Qdrant (Dense Search)
     if let Some(client) = qdrant {
         let collection = &config.qdrant_collection;
@@ -281,9 +321,9 @@ pub async fn search_candidate_events(
         }
     }
 
-    // 2. Keyword matching search in SQLite (Sparse Search)
-    for keyword in keywords {
-        let pattern = format!("%{}%", keyword);
+    // 2. Keyword matching search in SQLite (Sparse Search) using expanded shingles
+    for term in &search_terms_vec {
+        let pattern = format!("%{}%", term);
         let rows = sqlx::query!(
             r#"SELECT id FROM events 
                WHERE (title LIKE ? OR summary LIKE ? OR analysis LIKE ?) 
@@ -323,7 +363,7 @@ pub async fn search_candidate_events(
             let analysis_lower = row.analysis.to_lowercase();
             
             let mut matched_keywords = Vec::new();
-            for kw in keywords {
+            for kw in &search_terms_vec {
                 let kw_lower = kw.to_lowercase();
                 if title_lower.contains(&kw_lower)
                     || summary_lower.contains(&kw_lower)
@@ -334,14 +374,14 @@ pub async fn search_candidate_events(
             }
 
             // Exclude loose brand or general category associations:
-            // If the candidate matches only 1 keyword, and that keyword's length is <= 4, skip it.
+            // If the candidate matches only 1 keyword, and that keyword's length is <= 3, skip it.
             // (e.g., if it only matches "周大福" or "黄金", discard).
             // Also discard candidates that match 0 keywords.
-            if matched_keywords.len() == 1 && matched_keywords[0].chars().count() <= 4 {
+            if matched_keywords.len() == 1 && matched_keywords[0].chars().count() <= 3 {
                 tracing::info!(
                     title = %row.title,
                     matched_keyword = %matched_keywords[0],
-                    "Discarding candidate due to matching only a single short keyword (length <= 4)"
+                    "Discarding candidate due to matching only a single short keyword (length <= 3)"
                 );
                 continue;
             }
@@ -493,9 +533,9 @@ pub async fn run_retrospective_tracing(
     let keywords: Vec<String> = serde_json::from_str(&bookmark_event.keywords).unwrap_or_default();
     let bookmark_created_at = &bookmark_event.created_at;
 
-    // Clear any existing past links for this bookmark to prevent dirty runs
+    // Clear all existing links for this bookmark to prevent dirty runs
     sqlx::query!(
-        "DELETE FROM bookmark_evidence_chain WHERE bookmark_id = ? AND direction = 'past'",
+        "DELETE FROM bookmark_evidence_chain WHERE bookmark_id = ?",
         bookmark_id
     )
     .execute(pool)
@@ -503,6 +543,54 @@ pub async fn run_retrospective_tracing(
 
     // 2. Search local candidates
     let mut candidates = search_candidate_events(pool, qdrant, &keywords, event_id, config).await?;
+
+    // Scan newer candidates that already exist in the DB for 'future' developments
+    for c in &candidates {
+        if let Ok(c_row) = sqlx::query!("SELECT created_at FROM events WHERE id = ?", c.id)
+            .fetch_one(pool)
+            .await
+        {
+            if c_row.created_at > bookmark_event.created_at {
+                if let Ok(Some(eval_res)) = evaluate_event_link(
+                    doubao,
+                    pool,
+                    &bookmark_event.title,
+                    &bookmark_event.summary,
+                    &bookmark_event.analysis,
+                    &keywords,
+                    &bookmark_event.created_at,
+                    c,
+                    &c_row.created_at,
+                    "future",
+                )
+                .await
+                {
+                    // Calculate real similarity
+                    let e0_text = format!("{} {}", bookmark_event.title, bookmark_event.summary);
+                    let e0_emb = vectordb::get_embeddings(config, &[e0_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
+                    
+                    let candidate_text = format!("{} {}", c.title, c.summary);
+                    let candidate_emb = vectordb::get_embeddings(config, &[candidate_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
+                    let real_score = cosine_similarity(&e0_emb, &candidate_emb) as f64;
+
+                    if eval_res.match_score >= 0.75 && real_score >= 0.55 {
+                        let id = Uuid::new_v4().to_string();
+                        let _ = sqlx::query!(
+                            r#"INSERT OR REPLACE INTO bookmark_evidence_chain (id, bookmark_id, matched_event_id, direction, match_score, match_reason)
+                               VALUES (?, ?, ?, 'future', ?, ?)"#,
+                            id,
+                            bookmark_id,
+                            c.id,
+                            real_score,
+                            eval_res.relation_description
+                        )
+                        .execute(pool)
+                        .await;
+                    }
+                }
+            }
+        }
+    }
 
     // Filter local candidates that are strictly older than the bookmark to see if we need fallback crawl
     let mut older_local_candidates_count = 0;
@@ -562,7 +650,7 @@ pub async fn run_retrospective_tracing(
     let mut matched_count = 0;
     
     // Cache the embedding of E_0
-    let e0_text = format!("{} {} {}", bookmark_event.title, bookmark_event.summary, bookmark_event.analysis);
+    let e0_text = format!("{} {}", bookmark_event.title, bookmark_event.summary);
     let e0_emb = vectordb::get_embeddings(config, &[e0_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
 
     for level in 1..=5 {
@@ -602,12 +690,12 @@ pub async fn run_retrospective_tracing(
 
         // Batch calculate embeddings for candidates to rank them by Coherence Score
         let candidate_texts: Vec<String> = step_candidates.iter()
-            .map(|(c, _)| format!("{} {} {}", c.title, c.summary, c.analysis))
+            .map(|(c, _)| format!("{} {}", c.title, c.summary))
             .collect();
         let candidate_embs = vectordb::get_embeddings(config, &candidate_texts).await;
 
         // Current node E_{k-1} embedding
-        let ek_minus_1_text = format!("{} {} {}", current_node.title, current_node.summary, current_node.analysis);
+        let ek_minus_1_text = format!("{} {}", current_node.title, current_node.summary);
         let ek_minus_1_emb = vectordb::get_embeddings(config, &[ek_minus_1_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
 
         // Rank candidates using Coherence Score: C_k = 0.6 * cos_sim(E_0, c) + 0.4 * cos_sim(E_{k-1}, c)
@@ -627,12 +715,12 @@ pub async fn run_retrospective_tracing(
         // Sort descending by coherence score
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Threshold validation: if highest similarity is below 0.85, semantic drift is too high (追溯失真), stop tracking.
-        if ranked.is_empty() || ranked[0].1 < 0.85 {
+        // Threshold validation: if highest similarity is below 0.55, semantic drift is too high (追溯失真), stop tracking.
+        if ranked.is_empty() || ranked[0].1 < 0.55 {
             tracing::info!(
                 level = level,
                 max_score = ?ranked.first().map(|r| r.1),
-                "Coherence score dropped below threshold (0.80), halting tracing to prevent semantic drift"
+                "Coherence score dropped below threshold (0.55), halting tracing to prevent semantic drift"
             );
             break;
         }
@@ -657,7 +745,7 @@ pub async fn run_retrospective_tracing(
             .await
             {
                 // Strict validation: check LLM match_score!
-                if eval_res.match_score < 0.85 {
+                if eval_res.match_score < 0.75 {
                     tracing::info!(
                         candidate_title = %candidate.title,
                         match_score = %eval_res.match_score,
@@ -694,6 +782,18 @@ pub async fn run_retrospective_tracing(
         }
     }
 
+    // Insert current row as a marker that this bookmark has been traced
+    let marker_id = Uuid::new_v4().to_string();
+    sqlx::query!(
+        r#"INSERT OR REPLACE INTO bookmark_evidence_chain (id, bookmark_id, matched_event_id, direction, match_score, match_reason)
+           VALUES (?, ?, ?, 'current', 1.0, '当前关注新闻事件')"#,
+        marker_id,
+        bookmark_id,
+        event_id
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!(
         bookmark_id,
         matched_count,
@@ -728,7 +828,7 @@ pub async fn run_prospective_tracking(
     for bookmark in active_bookmarks {
         let keywords: Vec<String> = serde_json::from_str(&bookmark.keywords).unwrap_or_default();
         
-        let e0_text = format!("{} {} {}", bookmark.title, bookmark.summary, bookmark.analysis);
+        let e0_text = format!("{} {}", bookmark.title, bookmark.summary);
         let e0_emb = vectordb::get_embeddings(config, &[e0_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
 
         for event in new_events {
@@ -765,12 +865,12 @@ pub async fn run_prospective_tracking(
             .await
             {
                 // Calculate real cosine similarity
-                let candidate_text = format!("{} {} {}", event.title, event.summary, event.analysis);
+                let candidate_text = format!("{} {}", event.title, event.summary);
                 let candidate_emb = vectordb::get_embeddings(config, &[candidate_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
                 let real_score = cosine_similarity(&e0_emb, &candidate_emb) as f64;
 
-                // Strict validation: both LLM match score and vector score must be >= 0.85
-                if eval_res.match_score < 0.85 || real_score < 0.85 {
+                // Strict validation: both LLM match score and vector score must be >= 0.75 / 0.55
+                if eval_res.match_score < 0.75 || real_score < 0.55 {
                     tracing::info!(
                         event_title = %event.title,
                         match_score = %eval_res.match_score,

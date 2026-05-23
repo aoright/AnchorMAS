@@ -157,33 +157,65 @@ pub async fn synthesize_briefing(
 
 只返回JSON对象，不要包含其他任何解释性或markdown标记外层包装的文字。"#;
 
-    let system_prompt = super::get_agent_prompt(pool, "synthesizer", default_system_prompt).await;
+    // Query benchmark companies from user settings
+    let companies_row: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM user_settings WHERE key = 'benchmark_companies'"
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
 
-    let events_json: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "title": e.title,
-                "summary": e.summary,
-                "category": e.category,
-                "market": e.market,
-                "impact_type": e.impact_type,
-                "severity": e.severity,
-                "urgency": e.urgency,
-                "confidence": e.confidence,
-                "analysis": e.analysis,
-            })
-        })
-        .collect();
+    let benchmark_companies: Vec<String> = companies_row
+        .and_then(|r| serde_json::from_str(&r.0).ok())
+        .unwrap_or_default();
+
+    let mut system_prompt = super::get_agent_prompt(pool, "synthesizer", default_system_prompt).await;
+
+    // 强力质检底线规则：强制要求对已有事件的市场进行具体详实的分析，禁止敷衍使用“今日无重大事件”
+    system_prompt.push_str("\n\n【关键质检底线规则】：\n对于传入事件列表中已经包含具体事件的地区市场（例如 Japan、Korea、SoutheastAsia 等），严禁在 JSON 响应的 'overview' 概览里使用‘今日无重大事件’或空洞套话敷衍。你必须依据该市场下列出的所有事件，进行具有商业逻辑和启发性的实质性总结与分析。");
+
+    if !benchmark_companies.is_empty() {
+        system_prompt.push_str(&format!(
+            "\n\n请在撰写每日简报时，特别关注并重点分析与以下对标公司（Benchmark Companies）相关的动态，并阐述对本企业的战略启示或潜在威胁：\n{}",
+            benchmark_companies.iter().map(|c| format!("- {}", c)).collect::<Vec<_>>().join("\n")
+        ));
+    }
+
+    // 按市场（market）分组事件，并去除冗余的庞大 analysis 文本
+    let mut market_groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for e in events {
+        let ev_val = serde_json::json!({
+            "id": e.id,
+            "title": e.title,
+            "summary": e.summary,
+            "category": e.category,
+            "impact_type": e.impact_type,
+            "severity": e.severity,
+            "urgency": e.urgency,
+            "confidence": e.confidence,
+        });
+        market_groups.entry(e.market.clone()).or_default().push(ev_val);
+    }
+
+    let mut events_section = String::new();
+    for (market, group) in &market_groups {
+        events_section.push_str(&format!("### 【{} 市场事件（共 {} 个）】\n", market, group.len()));
+        events_section.push_str(&serde_json::to_string_pretty(group)?);
+        events_section.push_str("\n\n");
+    }
 
     let user_prompt = format!(
-        "今日共收集到{}个经过验证的市场事件：\n\n{}",
+        "今日共收集到{}个经过验证的市场事件，已按地区市场分组如下：\n\n{}",
         events.len(),
-        serde_json::to_string_pretty(&events_json)?
+        events_section
     );
 
     let response = client.chat(&system_prompt, &user_prompt, true).await?;
+
+    // Charge credits:
+    let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, "synthesizer", tokens as i64).await;
+
     let briefing = parse_briefing_response(&response, events)?;
 
     tracing::info!(id = %briefing.id, "Strategic briefing synthesized");
@@ -255,12 +287,7 @@ fn default_heatmap() -> HashMap<String, super::MarketStatus> {
 }
 
 fn extract_json_object(text: &str) -> String {
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
+    super::extract_json_object(text)
 }
 
 /// Audit the quality of the synthesized briefing. If any quality issues are detected,
@@ -299,6 +326,11 @@ pub async fn audit_briefing(
     );
 
     let response = client.chat(&system_prompt, &user_prompt, true).await?;
+
+    // Charge credits:
+    let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
+    let _ = super::parliament::charge_compute_credits(pool, "critic", tokens as i64).await;
+
     let raw_json = extract_json_object(&response);
     
     #[derive(serde::Deserialize)]
