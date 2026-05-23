@@ -91,6 +91,15 @@
           <span class="nav-marker"></span>
         </button>
 
+        <div class="nav-controls" data-controls="chat">
+          <button class="nav-new-session" type="button" data-role="session-new">
+            <span class="nav-new-session-glyph">+</span>
+            <span>New session · 新对话</span>
+          </button>
+          <span class="nav-sessions-label">Recent</span>
+          <ul class="nav-sessions" data-bind="session-list"></ul>
+        </div>
+
         <button class="nav-item" data-tab="market">
           <span class="nav-num">03</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.6" ry="8.5"/><line x1="3.5" y1="12" x2="20.5" y2="12"/></svg></span>
@@ -331,7 +340,42 @@
         </article>
       </section>
 
-      <section class="view" data-view="chat"><div class="view-placeholder"><span class="ph-rule"></span><span class="ph-text">Reserved · 对话</span><span class="ph-rule"></span></div></section>
+      <section class="view" data-view="chat">
+        <div class="chat-room">
+
+          <header class="chat-chrome">
+            <span class="chat-title" data-bind="chat-title">对话</span>
+          </header>
+
+          <div class="chat-context" data-bind="chat-context" hidden>
+            <span class="chat-context-label">Context</span>
+            <p class="chat-context-headline" data-bind="chat-context-text">—</p>
+          </div>
+
+          <div class="chat-empty" data-bind="chat-empty">
+            <h2 class="chat-empty-title">
+              <span class="chat-empty-en">How can I help today?</span>
+              <span class="chat-empty-cn">今天想问什么？</span>
+            </h2>
+            <p class="chat-empty-sub">Try one of these · 起手</p>
+            <div class="chat-prompts">
+              <button class="chat-prompt" type="button" data-prompt="今日哪个市场风险最高？">今日哪个市场风险最高？</button>
+              <button class="chat-prompt" type="button" data-prompt="对比中日韩本周变动">对比中日韩本周变动</button>
+              <button class="chat-prompt" type="button" data-prompt="越南那条对我品类影响多大？">越南那条对我品类影响多大？</button>
+            </div>
+          </div>
+
+          <div class="chat-feed" data-bind="chat-feed"></div>
+
+          <footer class="chat-input-bar">
+            <textarea class="chat-input-field" data-bind="chat-input" rows="1" placeholder="向 AnchorMAS 提问…"></textarea>
+            <button class="chat-send" type="button" data-role="chat-send" aria-label="发送">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3"/><path d="M4 7l4-4 4 4"/></svg>
+            </button>
+          </footer>
+
+        </div>
+      </section>
       <section class="view" data-view="market">
         <div class="news-view" data-active-region="all">
 

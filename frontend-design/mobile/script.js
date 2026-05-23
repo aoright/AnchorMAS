@@ -586,4 +586,350 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !viewer.hidden) close();
   });
+
+  // 来自 chat 的 citation 点击通过自定义事件触发
+  document.addEventListener('anchormas:open-source', (e) => {
+    const d = e.detail || {};
+    populate({ name: d.name || 'Source', time: d.time || '', title: d.title || '' });
+    show();
+  });
+})();
+
+
+/* ============================================================
+ * Chat — sessions, mock replies, mobile chrome 交互
+ * ============================================================ */
+(function () {
+  const $$ = (s, ctx) => Array.from((ctx || document).querySelectorAll(s));
+  const $  = (s, ctx) => (ctx || document).querySelector(s);
+
+  const SESSIONS_KEY = 'anchormas:chat:sessions';
+  const CURRENT_KEY  = 'anchormas:chat:current-session-id';
+
+  // ───── Mock answers (演示用) ─────
+  const PRESETS = {
+    '今日哪个市场风险最高？': {
+      text: '根据今日 5 个市场扫描，**东南亚（越南）** 风险最高 — Severity 5 / Urgency 4。TikTok Shop 越南站抽佣由 5% 上调至 8%，6 月起执行，直接挤压本地化定价空间。[1][2]\n\n次高是 **中国** （Severity 4 / Urgency 4），海关跨境电商 HS 编码申报抽查升级。[3]\n\n建议本周优先处理这两条。',
+      citations: [
+        { num: 1, name: 'Reuters',   time: '03:42', title: 'TikTok Shop Vietnam to raise commission rate from 5% to 8%' },
+        { num: 2, name: 'VnExpress', time: '02:18', title: 'TikTok Shop Việt Nam tăng phí hoa hồng' },
+        { num: 3, name: '海关总署',  time: '08:12', title: '海关总署关于跨境电商出口 HS 编码申报抽查规则升级的公告' }
+      ]
+    },
+    '对比中日韩本周变动': {
+      text: '三国当前一致信号：**平台 / 法规驱动**变动。\n\n**中国** · Risk · 海关 HS 编码抽查升级，影响中小品牌清关速度。[1]\n**日本** · Attention · 消費者庁 EC 标价规范修订意见征集，营销文案合规需检视。[2]\n**韩国** · Opportunity · Olive Young × 7-Eleven 渠道扩张，K-Beauty 同品类有进入窗口。[3]\n\n建议团队带宽优先压在中国清关 + 日本表达合规上；韩国机会窗口可由 BD 单线推进。',
+      citations: [
+        { num: 1, name: '海关总署',         time: '08:12', title: '海关总署 HS 编码抽查公告' },
+        { num: 2, name: '消費者庁',         time: '08:00', title: '電子商取引における価格表示の適正化' },
+        { num: 3, name: 'Olive Young 公告', time: '06:00', title: '올리브영 × 7-Eleven 채널 확장 공식 안내' }
+      ]
+    },
+    '越南那条对我品类影响多大？': {
+      text: '假设你做美妆 $5-15 价位 SKU：\n\n3% 抽佣上调 ≈ 单 SKU 毛利下降 **4-6%**。如果靠跑量摊薄边际，影响可控；如果依赖小批量高频上新，毛利会更敏感。\n\n短期建议：\n• Hero SKU 定价上调 **4-6%**，吸收增量抽佣\n• 自然流主推 + 减少站内付费占比\n• 6 月前完成本地化定价测试，避免新规生效首日库存空档[1]',
+      citations: [
+        { num: 1, name: 'Reuters', time: '03:42', title: 'TikTok Shop Vietnam to raise commission rate from 5% to 8%' }
+      ]
+    }
+  };
+  function pickAnswer(q) {
+    return PRESETS[q.trim()] || {
+      text: '演示模式：尚未接入实时检索。\n\n试试这几个预设问题：\n• 今日哪个市场风险最高？\n• 对比中日韩本周变动\n• 越南那条对我品类影响多大？',
+      citations: []
+    };
+  }
+
+  // ───── Storage ─────
+  function loadSessions() {
+    try { return JSON.parse(localStorage.getItem(SESSIONS_KEY)) || []; } catch (_) { return []; }
+  }
+  function saveSessions(arr) {
+    try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(arr)); } catch (_) {}
+  }
+  function getCurrentId() { try { return localStorage.getItem(CURRENT_KEY); } catch (_) { return null; } }
+  function setCurrentId(id) {
+    try {
+      if (id) localStorage.setItem(CURRENT_KEY, id);
+      else localStorage.removeItem(CURRENT_KEY);
+    } catch (_) {}
+  }
+  function findSession(id) { return id ? loadSessions().find(s => s.id === id) : null; }
+  function upsertSession(s) {
+    const all = loadSessions();
+    const i = all.findIndex(x => x.id === s.id);
+    if (i === -1) all.unshift(s);
+    else all[i] = s;
+    saveSessions(all);
+  }
+  function newSession(opts = {}) {
+    const id = 'sess-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const s = {
+      id,
+      title: opts.title || '新对话',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      context_story_id: opts.context_story_id || null,
+      context_text: opts.context_text || null,
+      messages: opts.messages || []
+    };
+    upsertSession(s);
+    setCurrentId(id);
+    return s;
+  }
+  function addMessage(sid, role, content, citations) {
+    const s = findSession(sid);
+    if (!s) return;
+    s.messages.push({ role, content, ts: new Date().toISOString(), citations: citations || null });
+    s.updated_at = new Date().toISOString();
+    if (role === 'user' && s.messages.filter(m => m.role === 'user').length === 1 && (s.title === '新对话' || !s.context_text)) {
+      s.title = content.slice(0, 28) + (content.length > 28 ? '…' : '');
+    }
+    upsertSession(s);
+  }
+
+  // ───── Format ─────
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function fmtTime(iso) { const d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function fmtRelTime(iso) {
+    const d = new Date(iso);
+    const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return diffMin + 'm';
+    if (diffMin < 1440) return Math.floor(diffMin / 60) + 'h';
+    if (diffMin < 10080) return Math.floor(diffMin / 1440) + 'd';
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function renderMarkdown(text) {
+    let html = escapeHtml(text);
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\[(\d+)\]/g, '<sup class="cite" data-ref="$1">[$1]</sup>');
+    html = html.split('\n\n').map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
+    return html;
+  }
+  function renderCitationsBlock(citations) {
+    if (!citations || !citations.length) return '';
+    const items = citations.map(c =>
+      '<button class="chat-citation" type="button"' +
+      ' data-cite-num="' + c.num + '"' +
+      ' data-cite-name="' + escapeHtml(c.name) + '"' +
+      ' data-cite-time="' + c.time + '"' +
+      ' data-cite-title="' + escapeHtml(c.title || '') + '">' +
+        '<span class="cite-num">[' + c.num + ']</span>' +
+        '<span class="cite-name">' + escapeHtml(c.name) + '</span>' +
+        '<time>' + c.time + '</time>' +
+      '</button>'
+    ).join('');
+    return '<div class="chat-citations">' + items + '</div>';
+  }
+  function renderBlock(m) {
+    const el = document.createElement('div');
+    if (m.role === 'user') {
+      el.className = 'chat-block chat-block-user';
+      el.innerHTML =
+        '<div class="chat-meta"><span class="chat-role">You</span><time>' + fmtTime(m.ts) + '</time></div>' +
+        '<p class="chat-bubble">' + escapeHtml(m.content) + '</p>';
+    } else {
+      el.className = 'chat-block chat-block-agent';
+      el.innerHTML =
+        '<div class="chat-meta"><span class="chat-role">AnchorMAS</span><time>' + fmtTime(m.ts) + '</time></div>' +
+        '<div class="chat-reply">' + renderMarkdown(m.content) + '</div>' +
+        renderCitationsBlock(m.citations);
+    }
+    return el;
+  }
+
+  // ───── Render ─────
+  function renderFeed() {
+    const feed  = $('[data-bind="chat-feed"]');
+    const empty = $('[data-bind="chat-empty"]');
+    const title = $('[data-bind="chat-title"]');
+    const ctxEl = $('[data-bind="chat-context"]');
+    const ctxText = $('[data-bind="chat-context-text"]');
+
+    const s = findSession(getCurrentId());
+    if (!s || !s.messages.length) {
+      if (feed) feed.innerHTML = '';
+      empty && empty.removeAttribute('hidden');
+      if (ctxEl) ctxEl.hidden = true;
+      if (title) title.textContent = s ? (s.title || '新对话') : '对话';
+      return;
+    }
+    empty && empty.setAttribute('hidden', '');
+    if (title) title.textContent = s.title || '对话';
+    if (s.context_text) {
+      if (ctxEl) ctxEl.hidden = false;
+      if (ctxText) ctxText.textContent = s.context_text;
+    } else {
+      if (ctxEl) ctxEl.hidden = true;
+    }
+    if (!feed) return;
+    feed.innerHTML = '';
+    for (const m of s.messages) feed.appendChild(renderBlock(m));
+    requestAnimationFrame(() => { feed.scrollTop = feed.scrollHeight; });
+  }
+
+  function renderSessions() {
+    const all = loadSessions();
+    const cid = getCurrentId();
+    // Mobile sheet
+    const mobileList = $('.session-sheet [data-bind="session-list"]');
+    if (mobileList) {
+      mobileList.innerHTML = all.length
+        ? all.map(s => '<li class="session-list-item' + (s.id === cid ? ' is-current' : '') + '" data-session-id="' + s.id + '">' +
+                       '<span class="session-list-item-title">' + escapeHtml(s.title) + '</span>' +
+                       '<time class="session-list-item-time">' + fmtRelTime(s.updated_at) + '</time></li>').join('')
+        : '<li class="session-list-empty">尚无会话</li>';
+    }
+    // Desktop sidebar
+    const sideList = $('.nav-controls[data-controls="chat"] .nav-sessions');
+    if (sideList) {
+      const top = all.slice(0, 10);
+      sideList.innerHTML = top.length
+        ? top.map(s => '<li class="nav-session-item' + (s.id === cid ? ' is-current' : '') + '" data-session-id="' + s.id + '">' +
+                       '<span class="nav-session-item-title">' + escapeHtml(s.title) + '</span>' +
+                       '<time class="nav-session-item-time">' + fmtRelTime(s.updated_at) + '</time></li>').join('')
+        : '<li class="nav-sessions-empty">无</li>';
+    }
+  }
+
+  // ───── Send ─────
+  function sendMessage(text) {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+    let sid = getCurrentId();
+    if (!sid || !findSession(sid)) { newSession(); sid = getCurrentId(); }
+    addMessage(sid, 'user', trimmed);
+    renderFeed();
+    renderSessions();
+    setTimeout(() => {
+      const ans = pickAnswer(trimmed);
+      addMessage(sid, 'agent', ans.text, ans.citations);
+      renderFeed();
+      renderSessions();
+    }, 600);
+  }
+
+  // ───── Wire UI ─────
+  const inputField = $('[data-bind="chat-input"]');
+  const sendBtn = $('[data-role="chat-send"]');
+  function trySend() {
+    if (!inputField) return;
+    const v = inputField.value || '';
+    if (!v.trim()) return;
+    sendMessage(v);
+    inputField.value = '';
+    inputField.style.height = 'auto';
+  }
+  if (sendBtn) sendBtn.addEventListener('click', trySend);
+  if (inputField) {
+    inputField.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); trySend(); }
+    });
+    inputField.addEventListener('input', () => {
+      inputField.style.height = 'auto';
+      inputField.style.height = Math.min(120, inputField.scrollHeight) + 'px';
+    });
+  }
+
+  // Prompt buttons
+  document.addEventListener('click', (e) => {
+    const p = e.target.closest('.chat-prompt');
+    if (p) sendMessage(p.dataset.prompt);
+  });
+
+  const app = document.querySelector('.app');
+
+  // Sessions sheet
+  const sheet = $('[data-role="session-sheet"]');
+  let sheetClosing = null;
+  function openSheet() {
+    if (!sheet) return;
+    delete sheet.dataset.state;
+    sheet.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+  function closeSheet() {
+    if (!sheet || sheet.hidden) return;
+    if (sheetClosing) clearTimeout(sheetClosing);
+    sheet.dataset.state = 'closing';
+    sheetClosing = setTimeout(() => {
+      sheet.hidden = true;
+      delete sheet.dataset.state;
+      document.body.style.overflow = '';
+      sheetClosing = null;
+    }, 280);
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('[data-role="chat-sessions-trigger"]')) { openSheet(); return; }
+    if (e.target.closest('[data-role="session-close"]')) { closeSheet(); return; }
+    if (e.target.closest('[data-role="session-new"]')) {
+      newSession();
+      renderFeed();
+      renderSessions();
+      closeSheet();
+      requestAnimationFrame(() => inputField && inputField.focus());
+      return;
+    }
+    const item = e.target.closest('.session-list-item, .nav-session-item');
+    if (item) {
+      setCurrentId(item.dataset.sessionId);
+      renderFeed();
+      renderSessions();
+      closeSheet();
+      return;
+    }
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+
+  // 追问 from story → new session with story context
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.story-action');
+    if (!btn) return;
+    const label = btn.querySelector('span') && btn.querySelector('span').textContent.trim();
+    if (label !== '追问') return;
+    const story = btn.closest('.story');
+    if (!story) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const headline = (story.querySelector('.story-headline') || {}).textContent || '';
+    const region = story.dataset.region || '';
+    newSession({
+      title: '追问 · ' + headline.slice(0, 18) + (headline.length > 18 ? '…' : ''),
+      context_story_id: region + '-' + Date.now(),
+      context_text: headline.trim()
+    });
+    if (app) {
+      app.setAttribute('data-tab', 'chat');
+      try { localStorage.setItem('anchormas:tab', 'chat'); } catch (_) {}
+    }
+    renderFeed();
+    renderSessions();
+    requestAnimationFrame(() => inputField && inputField.focus());
+  }, true);
+
+  // Citation click → 打开 source viewer（复用已有组件）
+  document.addEventListener('click', (e) => {
+    const citationBtn = e.target.closest('.chat-citation');
+    const citeInline  = e.target.closest('.cite[data-ref]');
+    if (!citationBtn && !citeInline) return;
+    let data;
+    if (citationBtn) {
+      data = { title: citationBtn.dataset.citeTitle, name: citationBtn.dataset.citeName, time: citationBtn.dataset.citeTime };
+    } else {
+      const block = citeInline.closest('.chat-block-agent');
+      const ref = citeInline.dataset.ref;
+      const linked = block && block.querySelector('.chat-citation[data-cite-num="' + ref + '"]');
+      if (!linked) return;
+      data = { title: linked.dataset.citeTitle, name: linked.dataset.citeName, time: linked.dataset.citeTime };
+    }
+    // 通知 source viewer
+    document.dispatchEvent(new CustomEvent('anchormas:open-source', { detail: data }));
+  });
+
+  // Initial render
+  renderFeed();
+  renderSessions();
 })();
