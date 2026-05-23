@@ -60,53 +60,73 @@ pub async fn crawl_web_for_keywords(
     keywords: &[String],
     lang: &str,
 ) -> Result<Vec<RawDocument>> {
-    let query = keywords.join(" ");
     let rss_url = "https://news.google.com/rss/search";
     
-    tracing::info!(keywords = ?keywords, "Triggering web crawl for keywords");
+    // We try multiple queries in order of specificity
+    let mut queries = Vec::new();
+    if keywords.len() > 2 {
+        queries.push(keywords[..2].join(" "));
+    }
+    if !keywords.is_empty() {
+        queries.push(keywords[0].clone());
+    }
+    if keywords.len() > 1 {
+        queries.push(keywords[1].clone());
+    }
 
-    let res = client
-        .get(rss_url)
-        .query(&[("q", &query), ("hl", &lang.to_string())])
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .context("Failed to request Google News RSS")?;
+    for query in queries {
+        tracing::info!(query = %query, "Attempting web crawl for query");
+        let res_attempt = client
+            .get(rss_url)
+            .query(&[("q", &query), ("hl", &lang.to_string())])
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
 
-    let bytes = res.bytes().await.context("Failed to read RSS bytes")?;
-    let feed = feed_rs::parser::parse(&bytes[..]).context("Failed to parse RSS feed")?;
+        if let Ok(res) = res_attempt {
+            if let Ok(bytes) = res.bytes().await {
+                if let Ok(feed) = feed_rs::parser::parse(&bytes[..]) {
+                    let mut docs = Vec::new();
+                    for entry in feed.entries.into_iter().take(8) {
+                        let title = entry.title.map(|t| t.content).unwrap_or_else(|| "Untitled".to_string());
+                        let link = entry.links.first().map(|l| l.href.clone()).unwrap_or_else(|| "".to_string());
+                        let summary_text = entry.summary.map(|s| s.content).unwrap_or_default();
+                        let content_text = entry.content.and_then(|c| c.body).unwrap_or_default();
+                        let raw_desc = if content_text.len() > summary_text.len() { content_text } else { summary_text };
+                        
+                        let fragment = scraper::Html::parse_fragment(&raw_desc);
+                        let content = fragment
+                            .root_element()
+                            .text()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .trim()
+                            .to_string();
 
-    let mut docs = Vec::new();
-    for entry in feed.entries.into_iter().take(8) { // Extract top 8 articles
-        let title = entry.title.map(|t| t.content).unwrap_or_else(|| "Untitled".to_string());
-        let link = entry.links.first().map(|l| l.href.clone()).unwrap_or_else(|| "".to_string());
-        let summary_text = entry.summary.map(|s| s.content).unwrap_or_default();
-        let content_text = entry.content.and_then(|c| c.body).unwrap_or_default();
-        let raw_desc = if content_text.len() > summary_text.len() { content_text } else { summary_text };
-        
-        // Strip HTML
-        let fragment = scraper::Html::parse_fragment(&raw_desc);
-        let content = fragment
-            .root_element()
-            .text()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string();
-
-        if !link.is_empty() {
-            docs.push(RawDocument {
-                source_url: link,
-                title,
-                content,
-                raw_language: lang.to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
+                        if !link.is_empty() {
+                            let ts = entry.published
+                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                                .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                            docs.push(RawDocument {
+                                source_url: link,
+                                title,
+                                content,
+                                raw_language: lang.to_string(),
+                                timestamp: ts,
+                            });
+                        }
+                    }
+                    if !docs.is_empty() {
+                        tracing::info!(query = %query, count = docs.len(), "Web crawl succeeded");
+                        return Ok(docs);
+                    }
+                }
+            }
         }
     }
 
-    Ok(docs)
+    Ok(Vec::new())
 }
 
 /// Convert a crawled raw document to a structured AnalyzedEvent using LLM.
@@ -173,6 +193,7 @@ pub async fn save_crawled_event(
     pool: &SqlitePool,
     qdrant: Option<&Qdrant>,
     event: &AnalyzedEvent,
+    created_at: Option<String>,
     config: &Config,
 ) -> Result<()> {
     // 1. Save to SQLite raw_articles
@@ -190,11 +211,12 @@ pub async fn save_crawled_event(
     .await;
 
     // 2. Save to SQLite events
+    let created_at_val = created_at.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
     let source_urls_json = serde_json::to_string(&event.source_urls)?;
     sqlx::query!(
         r#"INSERT OR REPLACE INTO events
-           (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         event.id,
         event.market,
         event.category,
@@ -206,7 +228,8 @@ pub async fn save_crawled_event(
         event.confidence,
         source_urls_json,
         None::<String>,
-        event.analysis
+        event.analysis,
+        created_at_val
     )
     .execute(pool)
     .await?;
@@ -281,7 +304,7 @@ pub async fn search_candidate_events(
         }
     }
 
-    // 3. Load full events for all unique candidate IDs
+    // 3. Load full events for all unique candidate IDs and strictly filter them
     for id in candidate_ids {
         let event_row = sqlx::query!(
             r#"SELECT id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, analysis
@@ -293,6 +316,43 @@ pub async fn search_candidate_events(
 
         if let Some(row) = event_row {
             let source_urls: Vec<String> = serde_json::from_str(&row.source_urls).unwrap_or_default();
+            
+            // Check matching keywords in title, summary, or analysis
+            let title_lower = row.title.to_lowercase();
+            let summary_lower = row.summary.to_lowercase();
+            let analysis_lower = row.analysis.to_lowercase();
+            
+            let mut matched_keywords = Vec::new();
+            for kw in keywords {
+                let kw_lower = kw.to_lowercase();
+                if title_lower.contains(&kw_lower)
+                    || summary_lower.contains(&kw_lower)
+                    || analysis_lower.contains(&kw_lower)
+                {
+                    matched_keywords.push(kw.clone());
+                }
+            }
+
+            // Exclude loose brand or general category associations:
+            // If the candidate matches only 1 keyword, and that keyword's length is <= 4, skip it.
+            // (e.g., if it only matches "周大福" or "黄金", discard).
+            // Also discard candidates that match 0 keywords.
+            if matched_keywords.len() == 1 && matched_keywords[0].chars().count() <= 4 {
+                tracing::info!(
+                    title = %row.title,
+                    matched_keyword = %matched_keywords[0],
+                    "Discarding candidate due to matching only a single short keyword (length <= 4)"
+                );
+                continue;
+            }
+            if matched_keywords.is_empty() {
+                tracing::info!(
+                    title = %row.title,
+                    "Discarding candidate due to matching zero keywords"
+                );
+                continue;
+            }
+
             candidates.push(AnalyzedEvent {
                 id: row.id.unwrap_or_default(),
                 market: row.market,
@@ -320,26 +380,46 @@ pub async fn evaluate_event_link(
     bookmark_summary: &str,
     bookmark_analysis: &str,
     bookmark_keywords: &[String],
+    bookmark_created_at: &str,
     candidate: &AnalyzedEvent,
+    candidate_created_at: &str,
+    direction: &str,
 ) -> Result<Option<EvidenceEvaluatorResponse>> {
-    let system_prompt = sqlx::query_scalar::<_, String>(
-        "SELECT system_prompt FROM agent_playbook WHERE role_id = 'evidence_evaluator'"
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|_| {
-        "你是一个严谨的行业数据分析专家。判断两个新闻事件是否属于相同的发展脉络。".to_string()
-    });
+    let system_prompt = crate::agent::get_agent_prompt(
+        pool,
+        "evidence_evaluator",
+        "你是一个严谨的行业数据分析专家。判断两个新闻事件是否属于相同的发展脉络。"
+    ).await;
+
+    let dir_desc = if direction == "past" {
+        "past (向过去溯源：评估候选新闻是否为已收藏新闻的直接因果起因/前置事件)"
+    } else {
+        "future (向未来追踪：评估候选新闻是否为已收藏新闻的直接因果后续进展/结果)"
+    };
 
     let user_prompt = format!(
-        "【已收藏新闻】\n- 标题: {}\n- 摘要: {}\n- 分析: {}\n- 特征词: {:?}\n\n【待评估候选新闻】\n- 标题: {}\n- 摘要: {}\n- 分析: {}",
+        "【追踪方向】: {}\n\n\
+         【已收藏新闻】\n\
+         - 标题: {}\n\
+         - 摘要: {}\n\
+         - 分析: {}\n\
+         - 特征词: {:?}\n\
+         - 发布时间: {}\n\n\
+         【待评估候选新闻】\n\
+         - 标题: {}\n\
+         - 摘要: {}\n\
+         - 分析: {}\n\
+         - 发布时间: {}",
+        dir_desc,
         bookmark_title,
         bookmark_summary,
         bookmark_analysis,
         bookmark_keywords,
+        bookmark_created_at,
         candidate.title,
         candidate.summary,
-        candidate.analysis
+        candidate.analysis,
+        candidate_created_at
     );
 
     let res = doubao.chat(&system_prompt, &user_prompt, true).await?;
@@ -351,6 +431,37 @@ pub async fn evaluate_event_link(
 
     let evaluator_res: EvidenceEvaluatorResponse = serde_json::from_str(cleaned_res)
         .context(format!("Failed to parse evaluator response: {}", res))?;
+
+    // --- Validation logic for evidence_evaluator ---
+    let mut evaluator_complaints = Vec::new();
+    if evaluator_res.is_linked {
+        if evaluator_res.relation_description.chars().count() < 10 {
+            evaluator_complaints.push("关联原因描述 (relation_description) 过于简短，无法具体说明逻辑传导机制。");
+        }
+        if evaluator_res.relation_description.contains("`") || evaluator_res.relation_description.contains("json") {
+            evaluator_complaints.push("描述中含有 markdown 格式的转义符或 JSON 块残留，须输出纯文本。");
+        }
+        let rel_type = evaluator_res.relation_type.to_lowercase();
+        if rel_type != "cause" && rel_type != "result" && rel_type != "comparison" {
+            evaluator_complaints.push("关联类型 (relation_type) 必须在 cause、result 或 comparison 中选择，请勿自行编造新类型。");
+        }
+    }
+
+    if !evaluator_complaints.is_empty() {
+        let feedback_msg = format!(
+            "在评估已收藏新闻与待匹配新闻【{}】的关联时，监督机制发现输出不规范：{} 请重新梳理逻辑关联机制，输出更精确的逻辑链评测结果。",
+            candidate.title,
+            evaluator_complaints.join(" ")
+        );
+        crate::agent::blackboard::log_feedback(
+            pool,
+            "validator",
+            "evidence_evaluator",
+            Some(&candidate.id),
+            &feedback_msg
+        ).await;
+        tracing::warn!("Evidence evaluator validation failed. Logged feedback to evidence_evaluator.");
+    }
 
     if evaluator_res.is_linked {
         Ok(Some(evaluator_res))
@@ -393,8 +504,21 @@ pub async fn run_retrospective_tracing(
     // 2. Search local candidates
     let mut candidates = search_candidate_events(pool, qdrant, &keywords, event_id, config).await?;
 
-    // 3. Fallback: If local candidates are dry (< 3), trigger web crawl to fetch background facts!
-    if candidates.len() < 3 {
+    // Filter local candidates that are strictly older than the bookmark to see if we need fallback crawl
+    let mut older_local_candidates_count = 0;
+    for c in &candidates {
+        if let Ok(c_row) = sqlx::query!("SELECT created_at FROM events WHERE id = ?", c.id)
+            .fetch_one(pool)
+            .await
+        {
+            if c_row.created_at < bookmark_event.created_at {
+                older_local_candidates_count += 1;
+            }
+        }
+    }
+
+    // 3. Fallback: If older local candidates are dry (< 3), trigger web crawl to fetch background facts!
+    if older_local_candidates_count < 3 {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
@@ -402,8 +526,11 @@ pub async fn run_retrospective_tracing(
         if let Ok(crawled_docs) = crawl_web_for_keywords(&http_client, &keywords, "zh").await {
             tracing::info!(crawled = crawled_docs.len(), "Web crawl returned articles");
             for doc in crawled_docs {
-                if let Ok(crawled_event) = convert_raw_doc_to_event(doubao, &doc).await {
-                    let _ = save_crawled_event(pool, qdrant, &crawled_event, config).await;
+                // Ensure crawled document timestamp is older than E_0 (the bookmark) before saving
+                if doc.timestamp < bookmark_event.created_at {
+                    if let Ok(crawled_event) = convert_raw_doc_to_event(doubao, &doc).await {
+                        let _ = save_crawled_event(pool, qdrant, &crawled_event, Some(doc.timestamp.clone()), config).await;
+                    }
                 }
             }
             // Reload candidates list to include the crawled entries
@@ -500,12 +627,12 @@ pub async fn run_retrospective_tracing(
         // Sort descending by coherence score
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Threshold validation: if highest similarity is below 0.65, semantic drift is too high (追溯失真), stop tracking.
-        if ranked.is_empty() || ranked[0].1 < 0.65 {
+        // Threshold validation: if highest similarity is below 0.85, semantic drift is too high (追溯失真), stop tracking.
+        if ranked.is_empty() || ranked[0].1 < 0.85 {
             tracing::info!(
                 level = level,
                 max_score = ?ranked.first().map(|r| r.1),
-                "Coherence score dropped below threshold (0.65), halting tracing to prevent semantic drift"
+                "Coherence score dropped below threshold (0.80), halting tracing to prevent semantic drift"
             );
             break;
         }
@@ -514,7 +641,7 @@ pub async fn run_retrospective_tracing(
         let mut found_next = false;
         let evaluation_pool = ranked.into_iter().take(3);
 
-        for (candidate, coherence_score, _c_created_at) in evaluation_pool {
+        for (candidate, coherence_score, c_created_at) in evaluation_pool {
             if let Ok(Some(eval_res)) = evaluate_event_link(
                 doubao,
                 pool,
@@ -522,10 +649,22 @@ pub async fn run_retrospective_tracing(
                 &bookmark_event.summary,
                 &bookmark_event.analysis,
                 &keywords,
+                &bookmark_event.created_at,
                 &candidate,
+                &c_created_at,
+                "past",
             )
             .await
             {
+                // Strict validation: check LLM match_score!
+                if eval_res.match_score < 0.85 {
+                    tracing::info!(
+                        candidate_title = %candidate.title,
+                        match_score = %eval_res.match_score,
+                        "Match score is too low, rejecting weak link"
+                    );
+                    continue;
+                }
                 // Save link to DB
                 let id = Uuid::new_v4().to_string();
                 sqlx::query!(
@@ -577,7 +716,7 @@ pub async fn run_prospective_tracking(
 
     // Fetch all active bookmarks
     let active_bookmarks = sqlx::query!(
-        r#"SELECT b.id as bookmark_id, b.keywords, e.id as event_id, e.title, e.summary, e.analysis
+        r#"SELECT b.id as bookmark_id, b.keywords, e.id as event_id, e.title, e.summary, e.analysis, e.created_at as event_created_at
            FROM bookmarks b
            JOIN events e ON b.event_id = e.id"#
     )
@@ -598,6 +737,18 @@ pub async fn run_prospective_tracking(
                 continue;
             }
 
+            // Fetch candidate created_at from SQLite
+            let candidate_created_at = match sqlx::query!(
+                "SELECT created_at FROM events WHERE id = ?",
+                event.id
+            )
+            .fetch_optional(pool)
+            .await
+            {
+                Ok(Some(row)) => row.created_at,
+                _ => String::new(),
+            };
+
             // Call evaluator to see if this new event fits the bookmark's story
             if let Ok(Some(eval_res)) = evaluate_event_link(
                 doubao,
@@ -606,7 +757,10 @@ pub async fn run_prospective_tracking(
                 &bookmark.summary,
                 &bookmark.analysis,
                 &keywords,
+                &bookmark.event_created_at,
                 event,
+                &candidate_created_at,
+                "future",
             )
             .await
             {
@@ -614,6 +768,17 @@ pub async fn run_prospective_tracking(
                 let candidate_text = format!("{} {} {}", event.title, event.summary, event.analysis);
                 let candidate_emb = vectordb::get_embeddings(config, &[candidate_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
                 let real_score = cosine_similarity(&e0_emb, &candidate_emb) as f64;
+
+                // Strict validation: both LLM match score and vector score must be >= 0.85
+                if eval_res.match_score < 0.85 || real_score < 0.85 {
+                    tracing::info!(
+                        event_title = %event.title,
+                        match_score = %eval_res.match_score,
+                        real_score = %real_score,
+                        "Rejecting weak prospective link due to low scores"
+                    );
+                    continue;
+                }
 
                 let id = Uuid::new_v4().to_string();
                 let direction = "future";

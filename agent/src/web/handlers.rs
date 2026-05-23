@@ -1293,10 +1293,27 @@ pub async fn get_evidence_chain(
 
     let mut consolidated: HashMap<String, MergeHelper> = HashMap::new();
 
+    let clean_title = |title: &str| -> String {
+        let mut cleaned = title.trim().to_lowercase();
+        let suffixes = [
+            "网易新闻", "网易", "新浪财经", "新浪网", "新浪", "腾讯新闻", "腾讯",
+            "搜狐网", "搜狐新闻", "搜狐", "百度新闻", "百度", "今日头条", "观察者网", "观察者",
+            "界面新闻", "界面", "澎湃新闻", "澎湃", "中国珠宝网", "珠宝网"
+        ];
+        for s in &suffixes {
+            cleaned = cleaned.replace(&format!("_{}", s), "");
+            cleaned = cleaned.replace(&format!("-{}", s), "");
+            cleaned = cleaned.replace(&format!("|{}", s), "");
+            cleaned = cleaned.replace(&format!(" {}", s), "");
+        }
+        cleaned.chars()
+            .filter(|c| c.is_alphanumeric() || (*c as u32 >= 0x4e00 && *c as u32 <= 0x9fff))
+            .collect::<String>()
+    };
+
     // Helper closure to insert/merge an item
     let mut merge_item = |item: EvidenceChainItem| {
-        // Normalize title by trimming and lowercasing for robust grouping
-        let norm_title = item.title.trim().to_lowercase();
+        let norm_title = clean_title(&item.title);
         let reason = item.relation_description.trim().to_string();
 
         if let Some(existing) = consolidated.get_mut(&norm_title) {

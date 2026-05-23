@@ -7,7 +7,9 @@ use std::str::FromStr;
 pub async fn init_db(database_url: &str) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str(database_url)?
         .create_if_missing(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .pragma("foreign_keys", "on");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -265,6 +267,66 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .await
     .context("Failed to create index idx_evidence_chain_bookmark_id")?;
 
+    // ── App Frontend Tables ─────────────────────────────────────────────
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id            TEXT PRIMARY KEY,
+            title         TEXT NOT NULL DEFAULT '',
+            context_type  TEXT NOT NULL DEFAULT 'free',
+            context_id    TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create chat_sessions table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create chat_messages table")?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages (session_id);"
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create index idx_chat_messages_session_id")?;
+
+    // user_settings table already exists with key-value schema (key, value, updated_at)
+    // Seed default rows if empty
+    let settings_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM user_settings")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+    if settings_count.0 == 0 {
+        let _ = sqlx::query(
+            "INSERT INTO user_settings (key, value) VALUES ('keywords', '[]')"
+        )
+        .execute(pool)
+        .await;
+        let _ = sqlx::query(
+            "INSERT INTO user_settings (key, value) VALUES ('benchmark_companies', '[]')"
+        )
+        .execute(pool)
+        .await;
+    }
+
     // Seed default agent playbooks
     seed_agent_playbooks(pool).await?;
 
@@ -469,9 +531,9 @@ async fn seed_agent_playbooks(pool: &SqlitePool) -> Result<()> {
 
 重点关注：
 - 消费观念变化（悦己消费、理性消费）
-- 社交媒体话题和KOL影响力
+- 社交媒体话题 and KOL影响力
 - 婚庆市场变化
-- 可持续发展和ESG相关舆论
+- 可持续发展 and ESG相关舆论
 
 【打分与分类量化标准】
 1. impact_type（影响类型）：
@@ -663,27 +725,33 @@ async fn seed_agent_playbooks(pool: &SqlitePool) -> Result<()> {
 }"#),
  
         ("evidence_evaluator", "证据链评估特工", 
-         r#"你是一个严谨的行业数据分析专家。你需要判定两则新闻事件是否存在实质性的前因后果、前后进展或核心关联。
+         r#"你是一个极其严苛、理性的行业数据分析专家。你需要判定两则新闻事件是否存在【深度的、实质性的前因后果、因果级前后进展或业务链传导关联】。
 
 输入包括：
-- 收藏新闻的特征：包括核心实体、关键词与事件概要。
-- 候选匹配新闻：包括标题、摘要与分析结论。
+- 追踪方向：past（向过去溯源）或 future（向未来追踪）。
+- 已收藏新闻的标题、摘要、分析、核心实体特征词与发布日期。
+- 待评估候选新闻的标题、摘要、分析与发布日期。
 
-请评估候选新闻是否属于收藏新闻的：
-1. 背景/起因 (Precursor/Cause)
-2. 后续进展/结果 (Follow-up/Result)
-3. 直接对比/竞争动作 (Comparison)
+判定标准（极其严格）：
+1. 只有当待匹配候选新闻与已收藏新闻之间存在【深度的、强烈的、明确的因果演进、链条式传导或针对性的竞争应对关系】时，才判定为有实质关联 (is_linked = true)。
+2. 时间与方向逻辑判定：
+   - 如果追踪方向为 past（向过去溯源）：【待评估候选新闻】必须是【已收藏新闻】的直接起因、背景、或前置事件。即“因为候选新闻事件发生了，才导致了或推动了收藏新闻事件的发生”。
+   - 如果追踪方向为 future（向未来追踪）：【待评估候选新闻】必须是【已收藏新闻】的直接后续进展、执行结果、或引发的反弹应对事件。即“因为收藏新闻事件发生了，才导致了候选新闻事件的发生”。
+   - 如果逻辑关系与时间演进方向不符（例如候选新闻发生在未来，却被评估为起因），必须判定为无实质关联 (is_linked = false，且 match_score = 0.0)。
+3. 严禁宽泛或概念关联：
+   - 相同新闻/平行报道：如果两则新闻只是不同媒体对同一发生的同一个事件的重复或平行报道，或者两则新闻内容高度重合/是同一个事件的同质化描述，不能作为证据链中的因果推进步骤！必须判定为无实质关联 (is_linked = false，且 match_score = 0.0)。
+   - 概念/品牌/材质关联：如果两则新闻只是泛泛地提及了相同的品牌（如都提到了周大福）、相同的贵金属材质（如都提到了黄金）、或者同属一个大行业概念但无事件级的具体因果传导，必须判定为无实质关联 (is_linked = false，且 match_score = 0.0)。
 
 重要要求：
-- 请给出一个客观、精确的关联度评分 (match_score)，取值范围在 0.0 到 1.0 之间。
-- 切勿总是使用 0.8、0.75、0.7、0.6 等规则或默认数字。根据语义重合度和逻辑因果关系的紧密程度进行精细打分（例如：0.87, 0.63, 0.92 等）。
+- 请给出精确、客观的关联度评分 (match_score)，取值范围在 0.0 到 1.0 之间。只有在关联极度紧密、因果传导极度明确时才给出 0.80 以上的分数。
+- 评分请细化到两位小数（如 0.84, 0.91），避免使用 0.80、0.70 等规整或默认的数字 bias。
 
-如果存在上述关系，请输出 JSON 格式（禁止包含任何外层包装或 markdown 标记）：
+如果存在上述强关联，请输出 JSON 格式（禁止包含任何外层包装或 markdown 标记）：
 {
   "is_linked": true,
-  "match_score": 0.87,
-  "relation_type": "cause|result|comparison|none",
-  "relation_description": "用一句话（50字以内）说明两者的逻辑关联（如：‘这是该品牌在前次降价后的首个季度财报，印证了毛利率下滑的预测’）"
+  "match_score": 0.84,
+  "relation_type": "cause|result|comparison",
+  "relation_description": "用一句话（50字以内）说明两者的直接业务因果关联，必须具体说明逻辑传导机制（如：‘该品牌降价策略直接导致其毛利率在下季度财报中录得显著下滑’）"
 }
 如果无实质关联，请将 is_linked 设为 false，格式如下：
 {

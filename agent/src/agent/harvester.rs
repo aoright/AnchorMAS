@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Utc, TimeZone};
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
 use std::future::Future;
@@ -214,12 +214,16 @@ async fn fetch_rss(client: &Client, url: &str, lang: &str) -> Result<Vec<RawDocu
             // Strip HTML tags from description using scraper
             let content = strip_html(&raw_desc);
 
+            let timestamp = entry.published
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+
             RawDocument {
                 source_url: link,
                 title,
                 content,
                 raw_language: lang.to_string(),
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp,
             }
         })
         .collect();
@@ -238,6 +242,26 @@ where
 {
     if docs.is_empty() {
         return docs;
+    }
+
+    let mut docs = docs;
+    
+    // Extract Google News URLs to decode in batch
+    let gnews_urls: Vec<String> = docs
+        .iter()
+        .filter(|doc| doc.source_url.contains("news.google.com/rss/articles/") || doc.source_url.contains("news.google.com/articles/"))
+        .map(|doc| doc.source_url.clone())
+        .collect();
+
+    if !gnews_urls.is_empty() {
+        tracing::info!("Batch decoding {} Google News URLs...", gnews_urls.len());
+        let decoded_map = decode_google_news_urls_batch(&gnews_urls).await;
+        tracing::info!("Decoded {} / {} Google News URLs", decoded_map.len(), gnews_urls.len());
+        for doc in &mut docs {
+            if let Some(decoded_url) = decoded_map.get(&doc.source_url) {
+                doc.source_url = decoded_url.clone();
+            }
+        }
     }
 
     let total_count = docs.len();
@@ -354,6 +378,47 @@ struct ArticleContentOutcome {
     doc: RawDocument,
     enriched: bool,
     error: Option<String>,
+}
+
+async fn decode_google_news_urls_batch(urls: &[String]) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if urls.is_empty() {
+        return map;
+    }
+
+    let script_path = std::env::var("AIRS_DECODE_URL_SCRIPT")
+        .unwrap_or_else(|_| "scripts/decode_url.py".to_string());
+    let mut command = tokio::process::Command::new("python3");
+    command.arg(script_path);
+    for url in urls {
+        command.arg(url);
+    }
+
+    let output = match command.output().await {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to execute python3 decode_url.py batch");
+            return map;
+        }
+    };
+
+    if !output.status.success() {
+        tracing::error!(
+            status = ?output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "decode_url.py batch process exited with non-zero code"
+        );
+        return map;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(decoded_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&stdout) {
+        map = decoded_map;
+    } else {
+        tracing::error!("Failed to parse decode_url.py batch stdout: {}", stdout);
+    }
+
+    map
 }
 
 async fn fetch_article_text(client: &Client, url: &str) -> Result<String> {
@@ -473,12 +538,22 @@ async fn fetch_reddit(client: &Client, url: &str) -> Result<Vec<RawDocument>> {
                     format!("https://www.reddit.com{}", permalink)
                 };
 
+                let created_utc = data
+                    .get("created_utc")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| Utc::now().timestamp() as f64);
+                
+                let timestamp = match chrono::Utc.timestamp_opt(created_utc as i64, 0) {
+                    chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    _ => Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                };
+
                 docs.push(RawDocument {
                     source_url,
                     title,
                     content: selftext,
                     raw_language: "en".to_string(),
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp,
                 });
             }
         }

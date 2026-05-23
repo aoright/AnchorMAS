@@ -405,6 +405,8 @@ fn get_role_name(role_id: &str) -> String {
         "critic" => "事实与逻辑监督官".to_string(),
         "refiner" => "分析结论修正特工".to_string(),
         "synthesizer" => "首席战略顾问 (Chief Strategist)".to_string(),
+        "evidence_evaluator" => "证据链评估特工".to_string(),
+        "designer" => "智能体设计专家 (Meta-Agent Designer)".to_string(),
         "evolution" => "进化指导特工 (Methodology Director)".to_string(),
         other => {
             if other.starts_with("analyst_") {

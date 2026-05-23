@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod app_handlers;
 
 use axum::Router;
 use qdrant_client::Qdrant;
@@ -136,6 +137,7 @@ pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::permissive();
 
     Router::new()
+        // ── Dashboard API (existing) ────────────────────────────────────
         .route("/api/raw-articles", axum::routing::get(handlers::get_raw_articles))
         .route("/api/pipeline/status", axum::routing::get(handlers::get_pipeline_status))
         .route("/api/briefing/latest", axum::routing::get(handlers::get_latest_briefing))
@@ -149,6 +151,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/bookmarks", axum::routing::post(handlers::post_bookmark).get(handlers::get_bookmarks))
         .route("/api/bookmarks/:id", axum::routing::delete(handlers::delete_bookmark))
         .route("/api/bookmarks/:id/evidence-chain", axum::routing::get(handlers::get_evidence_chain))
+        // ── App Frontend API (new) ──────────────────────────────────────
+        // News
+        .route("/app/news", axum::routing::get(app_handlers::list_news))
+        .route("/app/news/:id", axum::routing::get(app_handlers::get_news_detail))
+        // Briefings
+        .route("/app/briefings", axum::routing::get(app_handlers::list_briefings))
+        .route("/app/briefings/latest", axum::routing::get(app_handlers::get_latest_briefing))
+        .route("/app/briefings/:id", axum::routing::get(app_handlers::get_briefing_by_id))
+        // Chat Sessions
+        .route("/app/chat/sessions", axum::routing::get(app_handlers::list_sessions).post(app_handlers::create_session))
+        .route("/app/chat/sessions/:id", axum::routing::delete(app_handlers::delete_session))
+        .route("/app/chat/sessions/:id/messages", axum::routing::get(app_handlers::get_session_messages).post(app_handlers::send_message))
+        // Bookmarks
+        .route("/app/bookmarks", axum::routing::get(app_handlers::list_bookmarks).post(app_handlers::create_bookmark))
+        .route("/app/bookmarks/:id", axum::routing::delete(app_handlers::delete_bookmark))
+        .route("/app/bookmarks/:id/evidence", axum::routing::get(app_handlers::get_evidence_chain))
+        // Settings
+        .route("/app/settings", axum::routing::get(app_handlers::get_settings).put(app_handlers::update_settings))
+        // TTS
+        .route("/app/tts", axum::routing::post(app_handlers::synthesize_speech))
         .layer(cors)
         .with_state(state)
 }
+

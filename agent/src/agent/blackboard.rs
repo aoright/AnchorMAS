@@ -41,6 +41,9 @@ pub struct Blackboard {
     pub tx: broadcast::Sender<AgentMessage>,
     pub active_count: Arc<AtomicUsize>,
     pub idle_notify: Arc<Notify>,
+    pub llm_semaphore: Arc<tokio::sync::Semaphore>, // Shared LLM concurrency limit
+    pub processing_events: Arc<tokio::sync::Mutex<Vec<(FilteredEvent, Vec<f32>)>>>, // Active events currently in pipeline
+    pub merged_source_urls: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>, // Merged URLs mapping
 }
 
 impl Blackboard {
@@ -50,7 +53,50 @@ impl Blackboard {
             tx,
             active_count: Arc::new(AtomicUsize::new(0)),
             idle_notify: Arc::new(Notify::new()),
+            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(5)), // Safe 5 concurrent LLM calls
+            processing_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            merged_source_urls: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    pub async fn register_event(&self, event: FilteredEvent, embedding: Vec<f32>) {
+        let mut processing = self.processing_events.lock().await;
+        processing.push((event.clone(), embedding));
+
+        let mut urls = self.merged_source_urls.lock().await;
+        urls.insert(event.id, event.source_urls);
+    }
+
+    pub async fn check_and_merge_duplicate(&self, event: &FilteredEvent, embedding: &[f32]) -> Option<String> {
+        let mut processing = self.processing_events.lock().await;
+        let threshold = 0.82f32;
+
+        for (existing_event, existing_emb) in processing.iter_mut() {
+            let similarity: f32 = embedding.iter().zip(existing_emb.iter()).map(|(x, y)| x * y).sum();
+            if similarity >= threshold && event.category.eq_ignore_ascii_case(&existing_event.category) {
+                // Found a concurrent duplicate! Merge URLs.
+                let mut urls = self.merged_source_urls.lock().await;
+                if let Some(existing_urls) = urls.get_mut(&existing_event.id) {
+                    for url in &event.source_urls {
+                        if !existing_urls.contains(url) {
+                            existing_urls.push(url.clone());
+                        }
+                    }
+                }
+                return Some(existing_event.id.clone());
+            }
+        }
+        None
+    }
+
+    pub async fn get_merged_urls(&self, event_id: &str) -> Option<Vec<String>> {
+        let urls = self.merged_source_urls.lock().await;
+        urls.get(event_id).cloned()
+    }
+
+    pub async fn remove_event(&self, event_id: &str) {
+        let mut processing = self.processing_events.lock().await;
+        processing.retain(|(e, _)| e.id != event_id);
     }
 
     pub fn increment_work(&self, n: usize) {
@@ -197,6 +243,23 @@ pub async fn start_deduplicator(
                 let blackboard_clone = blackboard.clone();
 
                 tokio::spawn(async move {
+                    let text = format!("{} {}", event.title, event.summary);
+                    // Acquire LLM permit for embedding calculation
+                    let embedding = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        crate::vectordb::get_embeddings(&config_clone, &[text]).await.pop().unwrap_or_else(|| crate::vectordb::pseudo_embedding(&event.title))
+                    };
+
+                    // Check concurrent deduplication
+                    if let Some(target_id) = blackboard_clone.check_and_merge_duplicate(&event, &embedding).await {
+                        tracing::info!(event_id = %event.id, target_id = %target_id, "Found concurrent duplicate event, merged URLs and discarding");
+                        blackboard_clone.decrement_work();
+                        return;
+                    }
+
+                    // Register this event as active in-flight processing
+                    blackboard_clone.register_event(event.clone(), embedding).await;
+
                     let mut found_historical = false;
 
                     if let Some(ref qclient) = qdrant_clone {
@@ -204,7 +267,9 @@ pub async fn start_deduplicator(
                         if let Some((hist_id, mut hist_urls, analysis)) = find_historical_duplicate(qclient, collection, &event, &config_clone).await {
                             tracing::info!(event_id = %event.id, hist_id = %hist_id, "Found historical duplicate event, merging and rolling forward");
                             
-                            for url in &event.source_urls {
+                            // Merge URLs from memory cache if any concurrent duplicates were merged
+                            let merged_urls = blackboard_clone.get_merged_urls(&event.id).await.unwrap_or_else(|| event.source_urls.clone());
+                            for url in &merged_urls {
                                 if !hist_urls.contains(url) {
                                     hist_urls.push(url.clone());
                                 }
@@ -221,7 +286,7 @@ pub async fn start_deduplicator(
 
                             if let Some((market, category, title, summary, impact_type, severity, urgency, confidence)) = row_opt {
                                 let updated_event = AnalyzedEvent {
-                                    id: hist_id,
+                                    id: hist_id.clone(),
                                     market,
                                     category,
                                     title,
@@ -234,6 +299,7 @@ pub async fn start_deduplicator(
                                     analysis,
                                 };
                                 let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(updated_event));
+                                blackboard_clone.remove_event(&event.id).await;
                                 blackboard_clone.decrement_work();
                                 found_historical = true;
                             }
@@ -269,7 +335,11 @@ pub async fn start_analyst_coordinator(
                 let blackboard_clone = blackboard.clone();
                 tokio::spawn(async move {
                     tracing::info!(event_id = %event.id, category = %event.category, "Analyst starting analysis");
-                    match analyst::analyze_single_event(&client_clone, &pool_clone, &event).await {
+                    let analysis_result = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        analyst::analyze_single_event(&client_clone, &pool_clone, &event).await
+                    };
+                    match analysis_result {
                         Ok(analyzed) => {
                             let _ = blackboard_clone.tx.send(AgentMessage::AnalysisCompleted(analyzed));
                         }
@@ -326,7 +396,11 @@ pub async fn start_peer_reviewer(
                     };
 
                     tracing::info!(event_id = %event.id, peer = %peer_role_id, "Peer reviewer starting cross-domain review");
-                    let review_comments = match analyst::peer_review_event(&client_clone, &pool_clone, &event, peer_role_id).await {
+                    let review_comments = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        analyst::peer_review_event(&client_clone, &pool_clone, &event, peer_role_id).await
+                    };
+                    let review_comments = match review_comments {
                         Ok(comments) => comments,
                         Err(e) => {
                             tracing::error!("Peer review failed for event {}: {}", event.id, e);
@@ -366,13 +440,21 @@ pub async fn start_critic(
                 tokio::spawn(async move {
                     let doc_content = fetch_raw_content(&pool_clone, &event).await;
                     tracing::info!(event_id = %event.id, "Critic starting pass 1 fact check");
-                    match verifier::run_critic_pass(&client_clone, &pool_clone, &event, &doc_content, Some(&peer_comments)).await {
+                    let pass_result = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        verifier::run_critic_pass(&client_clone, &pool_clone, &event, &doc_content, Some(&peer_comments)).await
+                    };
+                    match pass_result {
                         Ok((approved, critique_notes, conf_adj)) => {
                             if approved {
                                 tracing::info!(event_id = %event.id, "Critic approved analysis on pass 1");
                                 let mut final_event = event.clone();
                                 final_event.confidence = conf_adj.clamp(1, 5);
+                                if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
+                                    final_event.source_urls = urls;
+                                }
                                 let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                                blackboard_clone.remove_event(&event.id).await;
                                 blackboard_clone.decrement_work();
                             } else {
                                 tracing::info!(event_id = %event.id, critique = %critique_notes, "Critic rejected analysis on pass 1, triggering refinement");
@@ -400,7 +482,12 @@ pub async fn start_critic(
                         }
                         Err(e) => {
                             tracing::error!("Critic pass 1 failed for event {}: {}, bypassing", event.id, e);
-                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(event));
+                            let mut final_event = event.clone();
+                            if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
+                                final_event.source_urls = urls;
+                            }
+                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
                     }
@@ -414,7 +501,11 @@ pub async fn start_critic(
                 tokio::spawn(async move {
                     let doc_content = fetch_raw_content(&pool_clone, &event).await;
                     tracing::info!(event_id = %event.id, "Critic starting pass 2 fact check");
-                    match verifier::run_critic_pass(&client_clone, &pool_clone, &event, &doc_content, None).await {
+                    let pass_result = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        verifier::run_critic_pass(&client_clone, &pool_clone, &event, &doc_content, None).await
+                    };
+                    match pass_result {
                         Ok((approved, critique_notes, conf_adj)) => {
                             let mut final_event = event.clone();
                             final_event.confidence = conf_adj.clamp(1, 5);
@@ -430,12 +521,21 @@ pub async fn start_critic(
                             } else {
                                 tracing::info!(event_id = %event.id, "Critic approved analysis on pass 2");
                             }
+                            if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
+                                final_event.source_urls = urls;
+                            }
                             let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
                         Err(e) => {
                             tracing::error!("Critic pass 2 failed for event {}: {}, proceeding with original", event.id, e);
-                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(event));
+                            let mut final_event = event.clone();
+                            if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
+                                final_event.source_urls = urls;
+                            }
+                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
                     }
@@ -482,12 +582,20 @@ pub async fn start_refiner(
                 tokio::spawn(async move {
                     let doc_content = fetch_raw_content(&pool_clone, &event).await;
                     tracing::info!(event_id = %event.id, "Refiner starting refinement pass");
-                    match verifier::run_refinement_pass(&client_clone, &pool_clone, &event, &critique_notes, &doc_content).await {
+                    let refined_result = {
+                        let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                        verifier::run_refinement_pass(&client_clone, &pool_clone, &event, &critique_notes, &doc_content).await
+                    };
+                    match refined_result {
                         Ok(refined_event) => {
                             tracing::info!(event_id = %event.id, "Refinement complete. Triggering real-time evolution.");
                             
                             // Real-time Evolution: Run prompt evolution agent on feedback log immediately
-                            match evolution::evolve_from_feedback_log(&pool_clone, &client_clone).await {
+                            let evolution_result = {
+                                let _permit = blackboard_clone.llm_semaphore.acquire().await.unwrap();
+                                evolution::evolve_from_feedback_log(&pool_clone, &client_clone).await
+                            };
+                            match evolution_result {
                                 Ok(updates) => {
                                     for update in updates {
                                         tracing::info!(role = %update.target_role_id, "Real-time playbook evolution succeeded!");

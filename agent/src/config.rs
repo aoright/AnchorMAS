@@ -12,6 +12,8 @@ pub struct Config {
     pub llm_api_url: String,
     pub embedding_api_url: String,
     pub embedding_model: String,
+    pub tts_model: String,
+    pub tts_voice: String,
 }
 
 impl Config {
@@ -40,6 +42,12 @@ impl Config {
         let embedding_model = std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| {
             "text-embedding-v3".to_string()
         });
+        let tts_model = std::env::var("TTS_MODEL").unwrap_or_else(|_| {
+            "cosyvoice-v3-flash".to_string()
+        });
+        let tts_voice = std::env::var("TTS_VOICE").unwrap_or_else(|_| {
+            "longxiaochun_v3".to_string()
+        });
 
         Ok(Self {
             ark_api_key,
@@ -51,6 +59,8 @@ impl Config {
             llm_api_url,
             embedding_api_url,
             embedding_model,
+            tts_model,
+            tts_voice,
         })
     }
 }

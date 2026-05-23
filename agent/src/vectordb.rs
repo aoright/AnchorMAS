@@ -239,6 +239,10 @@ pub async fn store_events(
             payload.insert("confidence".to_string(), int_val(event.confidence));
             payload.insert("briefing_id".to_string(), str_val(briefing_id));
             payload.insert("doc_type".to_string(), str_val("analyzed_event"));
+            payload.insert(
+                "source_urls".to_string(),
+                str_val(&serde_json::to_string(&event.source_urls).unwrap_or_default()),
+            );
 
             PointStruct::new(event.id.clone(), embedding, payload)
         })

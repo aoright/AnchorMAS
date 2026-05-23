@@ -305,11 +305,22 @@ where
     tracing::info!(count = raw_docs.len(), "Harvesting complete");
 
     let (new_raw_docs, _updated_existing_count, cache_message) = if force {
-        let cached_docs = load_recent_raw_articles(pool, 500).await?;
-        let message = format!(
-            "Force rescan: processing all {} raw articles from database",
-            cached_docs.len()
-        );
+        if !raw_docs.is_empty() {
+            save_raw_articles(pool, &raw_docs).await?;
+            if let Some(qclient) = qdrant {
+                let collection = &config.qdrant_collection;
+                if let Err(e) = crate::vectordb::store_documents(qclient, collection, &raw_docs, config).await {
+                    tracing::error!(error = %e, "Failed to store raw documents in Qdrant during force scan");
+                }
+            }
+        }
+        let mut cached_docs = load_today_and_yesterday_raw_articles(pool).await?;
+        let mut msg_prefix = "Force rescan: processing today and yesterday's news";
+        if cached_docs.is_empty() {
+            cached_docs = load_recent_raw_articles(pool, 100).await?;
+            msg_prefix = "Force rescan: no recent news found, fallback to loading 100 recent articles";
+        }
+        let message = format!("{} (loaded {} articles)", msg_prefix, cached_docs.len());
         (cached_docs, 0, message)
     } else if raw_docs.is_empty() {
         if let Ok(Some(briefing)) = get_latest_briefing_from_db(pool).await {
@@ -326,32 +337,13 @@ where
             return Ok(briefing);
         }
 
-        let cached_docs = load_recent_raw_articles(pool, 500).await?;
+        let mut cached_docs = load_today_and_yesterday_raw_articles(pool).await?;
+        let mut msg_prefix = "No new articles found; continuing from today and yesterday's news";
         if cached_docs.is_empty() {
-            progress(PipelineProgress {
-                current_step: Some(PipelineStep::Synthesizer),
-                raw_count: Some(0),
-                message: Some("No new or cached documents available".to_string()),
-                ..PipelineProgress::default()
-            })
-            .await;
-            tracing::warn!("No documents harvested and no cached raw articles found");
-            let briefing = StrategicBriefing {
-                id: Uuid::new_v4().to_string(),
-                date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-                overview: "今日未能采集到有效数据，请检查数据源连接状态。".to_string(),
-                heatmap: HashMap::new(),
-                events: Vec::new(),
-                recommendations: vec!["检查RSS数据源连接状态。".to_string()],
-            };
-            save_briefing(pool, &briefing).await?;
-            return Ok(briefing);
+            cached_docs = load_recent_raw_articles(pool, 100).await?;
+            msg_prefix = "No new articles found; fallback to loading 100 recent articles";
         }
-
-        let message = format!(
-            "No new articles found; continuing from {} cached raw articles",
-            cached_docs.len()
-        );
+        let message = format!("{} (loaded {} articles)", msg_prefix, cached_docs.len());
         (cached_docs, 0, message)
     } else {
         let updated_existing_count =
@@ -389,13 +381,20 @@ where
             }
         }
 
+        let mut today_yesterday_docs = load_today_and_yesterday_raw_articles(pool).await?;
+        let mut msg_prefix = "Processing today and yesterday's news";
+        if today_yesterday_docs.is_empty() {
+            today_yesterday_docs = new_raw_docs.clone();
+            msg_prefix = "No today/yesterday cached news; processing newly harvested articles";
+        }
+
         let message = format!(
-            "Found {} harvested articles, {} are new and will be filtered; updated {} existing articles with longer content",
-            raw_docs.len(),
-            new_raw_docs.len(),
+            "{} (loaded {} articles); updated {} existing articles with longer content",
+            msg_prefix,
+            today_yesterday_docs.len(),
             updated_existing_count
         );
-        (new_raw_docs, updated_existing_count, message)
+        (today_yesterday_docs, updated_existing_count, message)
     };
 
     if new_raw_docs.is_empty() {
@@ -667,14 +666,15 @@ async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument]) -> Result<()
     for doc in docs {
         let id = Uuid::new_v4().to_string();
         sqlx::query(
-            r#"INSERT OR IGNORE INTO raw_articles (id, source_url, title, content, raw_language)
-               VALUES (?, ?, ?, ?, ?)"#,
+            r#"INSERT OR IGNORE INTO raw_articles (id, source_url, title, content, raw_language, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&id)
         .bind(&doc.source_url)
         .bind(&doc.title)
         .bind(&doc.content)
         .bind(&doc.raw_language)
+        .bind(&doc.timestamp)
         .execute(pool)
         .await
         .context("Failed to save raw article")?;
@@ -749,6 +749,29 @@ async fn load_recent_raw_articles(pool: &SqlitePool, limit: i64) -> Result<Vec<R
         .collect())
 }
 
+async fn load_today_and_yesterday_raw_articles(pool: &SqlitePool) -> Result<Vec<RawDocument>> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
+        r#"SELECT source_url, title, content, raw_language, created_at
+           FROM raw_articles
+           WHERE date(created_at) >= date('now', '-1 day')
+           ORDER BY created_at DESC"#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to load today and yesterday's raw articles")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(source_url, title, content, raw_language, timestamp)| RawDocument {
+            source_url,
+            title,
+            content,
+            raw_language,
+            timestamp,
+        })
+        .collect())
+}
+
 async fn save_briefing(pool: &SqlitePool, briefing: &StrategicBriefing) -> Result<()> {
     let heatmap_json = serde_json::to_string(&briefing.heatmap)?;
     let recommendations_json = serde_json::to_string(&briefing.recommendations)?;
@@ -773,10 +796,25 @@ async fn save_briefing(pool: &SqlitePool, briefing: &StrategicBriefing) -> Resul
 async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEvent]) -> Result<()> {
     for event in events {
         let source_urls_json = serde_json::to_string(&event.source_urls)?;
+        
+        // Find the earliest created_at timestamp among the source URLs in raw_articles
+        let mut created_at_val = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        if let Some(first_url) = event.source_urls.first() {
+            if let Ok(Some(row)) = sqlx::query!(
+                "SELECT created_at FROM raw_articles WHERE source_url = ? LIMIT 1",
+                first_url
+            )
+            .fetch_optional(pool)
+            .await
+            {
+                created_at_val = row.created_at;
+            }
+        }
+
         sqlx::query(
             r#"INSERT OR REPLACE INTO events
-               (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+               (id, market, category, title, summary, impact_type, severity, urgency, confidence, source_urls, briefing_id, analysis, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&event.id)
         .bind(&event.market)
@@ -790,6 +828,7 @@ async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEve
         .bind(&source_urls_json)
         .bind(briefing_id)
         .bind(&event.analysis)
+        .bind(&created_at_val)
         .execute(pool)
         .await
         .context("Failed to save event")?;
