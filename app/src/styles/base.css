@@ -1,0 +1,23 @@
+/* Paper grain overlay — applied via fixed SVG in App.tsx */
+.paper-grain {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: multiply;
+  opacity: 1;
+}
+[data-theme="dark"] .paper-grain { mix-blend-mode: screen; opacity: 0.5; }
+
+#root {
+  position: relative;
+  background: var(--paper);
+  isolation: isolate;
+}
+
+/* Scrollbar minimal */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--hair-strong); border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }

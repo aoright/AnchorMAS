@@ -1,0 +1,364 @@
+/* ===== M4 Chat 真数据接入扩展 ===== */
+
+/* —— Pending "正在思考" block —— */
+.chat-pending {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+}
+
+.chat-pending-radar {
+  width: 22px;
+  height: 22px;
+  position: relative;
+  flex-shrink: 0;
+}
+.chat-pending-radar svg {
+  width: 100%;
+  height: 100%;
+  color: var(--accent);
+}
+.chat-pending-radar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    var(--accent) 0deg,
+    rgba(184, 71, 43, 0.5) 30deg,
+    transparent 90deg,
+    transparent 360deg
+  );
+  -webkit-mask: radial-gradient(circle, transparent 4px, black 5px, black 9px, transparent 10px);
+          mask: radial-gradient(circle, transparent 4px, black 5px, black 9px, transparent 10px);
+  animation: radar-sweep 1.8s linear infinite;
+}
+@keyframes radar-sweep {
+  to { transform: rotate(360deg); }
+}
+
+.chat-pending-text {
+  text-transform: uppercase;
+}
+.chat-pending-dots::after {
+  content: "···";
+  animation: pending-dots 1.6s steps(4, end) infinite;
+}
+@keyframes pending-dots {
+  0%   { clip-path: inset(0 100% 0 0); }
+  100% { clip-path: inset(0 0 0 0); }
+}
+
+/* —— Chat block render (real data) —— */
+.chat-block {
+  margin-bottom: 26px;
+  animation: rise 0.32s both cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.chat-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.chat-role {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.chat-block-user .chat-role { color: var(--ink-2); }
+.chat-block-agent .chat-role { color: var(--accent); }
+.chat-meta time {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  letter-spacing: 0.04em;
+}
+
+.chat-bubble {
+  font-family: var(--f-body);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  padding: 11px 14px;
+  background: var(--paper-2);
+  border-radius: 10px;
+  white-space: pre-wrap;
+}
+
+.chat-reply {
+  font-family: var(--f-body);
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.chat-reply > *:first-child { margin-top: 0; }
+.chat-reply > *:last-child { margin-bottom: 0; }
+
+.chat-reply p { margin: 0 0 10px; }
+.chat-reply strong { font-weight: 600; color: var(--accent); }
+.chat-reply em { font-style: italic; color: var(--ink-2); }
+.chat-reply a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 0.5px;
+}
+
+/* Headings */
+.chat-reply h1, .chat-reply h2, .chat-reply h3,
+.chat-reply h4, .chat-reply h5, .chat-reply h6 {
+  font-family: var(--f-display);
+  color: var(--ink);
+  line-height: 1.3;
+  margin: 18px 0 8px;
+  font-weight: 500;
+}
+.chat-reply h1 { font-size: 22px; padding-bottom: 6px; border-bottom: 0.5px solid var(--hair); }
+.chat-reply h2 { font-size: 19px; padding-bottom: 5px; border-bottom: 0.5px solid var(--hair-soft); }
+.chat-reply h3 {
+  font-size: 16px;
+  color: var(--accent);
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-reply h3::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 1px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.chat-reply h4 { font-size: 14.5px; color: var(--ink-2); font-weight: 600; }
+
+/* Lists */
+.chat-reply ul, .chat-reply ol {
+  padding-left: 1.4em;
+  margin: 0 0 10px;
+}
+.chat-reply li { margin-bottom: 6px; line-height: 1.65; }
+.chat-reply li > p:last-child { margin-bottom: 0; }
+.chat-reply ul li::marker { color: var(--accent); }
+.chat-reply ol li::marker {
+  color: var(--accent);
+  font-family: var(--f-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Blockquote */
+.chat-reply blockquote {
+  border-left: 2px solid var(--accent);
+  padding: 4px 12px;
+  margin: 10px 0;
+  background: var(--accent-soft);
+  color: var(--ink-2);
+  font-style: italic;
+  border-radius: 0 6px 6px 0;
+}
+
+/* Code */
+.chat-reply code {
+  font-family: var(--f-mono);
+  font-size: 0.9em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--paper-2);
+  color: var(--accent);
+  letter-spacing: 0;
+}
+.chat-reply pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  background: var(--paper-2);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.chat-reply pre code {
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+}
+
+/* HR */
+.chat-reply hr {
+  margin: 18px 0;
+  border: 0;
+  border-top: 0.5px dashed var(--hair-strong);
+}
+
+/* Tables (remark-gfm) */
+.chat-reply table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+  font-family: var(--f-body);
+}
+.chat-reply thead {
+  background: var(--paper-2);
+}
+.chat-reply th, .chat-reply td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 0.5px solid var(--hair);
+  vertical-align: top;
+  line-height: 1.55;
+}
+.chat-reply th {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  border-bottom: 0.5px solid var(--hair-strong);
+}
+.chat-reply tbody tr:nth-child(even) { background: var(--hair-soft); }
+
+/* mobile: 表格可横滚 */
+.mobile-app .chat-reply table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.mobile-app .chat-reply td, .mobile-app .chat-reply th {
+  white-space: normal;
+}
+
+/* —— Streaming cursor —— */
+.chat-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  animation: cursor-blink 0.9s steps(2, start) infinite;
+  border-radius: 1px;
+}
+@keyframes cursor-blink {
+  to { opacity: 0; }
+}
+
+/* —— Context card —— */
+.chat-context {
+  margin-bottom: 18px;
+  padding: 11px 14px;
+  background: var(--accent-soft);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+}
+.chat-context-label {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.chat-context-headline {
+  font-family: var(--f-cn);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* —— Session list items (mobile + desktop reuse) —— */
+.session-list-item,
+.nav-session-item {
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.session-list-item.is-current,
+.nav-session-item.is-current {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.session-list-item-delete,
+.nav-session-item-delete {
+  opacity: 0;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--ink-4);
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.session-list-item:hover .session-list-item-delete,
+.nav-session-item:hover .nav-session-item-delete {
+  opacity: 1;
+}
+.session-list-item-delete:hover,
+.nav-session-item-delete:hover {
+  background: rgba(184, 71, 43, 0.12);
+  color: var(--accent);
+}
+
+/* —— Desktop chat: omit burger header (sessions in sidebar) —— */
+.desktop-app .chat-chrome { display: none; }
+
+/* —— Desktop chat-room: maximize content area —— */
+.desktop-app .chat-room {
+  padding-top: 28px;
+}
+
+/* —— Fix layout: chat-empty needs flex-grow so input-bar sticks bottom
+ *    (even when context card is present above) —— */
+.chat-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.chat-empty > * { width: 100%; max-width: 560px; }
+.chat-empty .chat-empty-title { text-align: center; }
+.chat-empty .chat-empty-sub { text-align: center; }
+/* mobile：把原来限定行为 (flex: 0 0 auto) 覆盖掉 */
+.mobile-app .chat-empty { padding: 32px 24px; }
+
+/* —— Context card：把宽度限制下来不要横铺整宽 —— */
+.desktop-app .chat-context {
+  max-width: 760px;
+  margin: 16px auto 0;
+  border-bottom: 0;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent-soft);
+}
+.mobile-app .chat-context {
+  margin: 12px 14px 0;
+  border-bottom: 0;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent-soft);
+}
+
+/* —— Input bar：让 desktop 也居中 + 最大宽度限制 —— */
+.desktop-app .chat-input-bar {
+  justify-content: center;
+}
+.desktop-app .chat-input-bar > .chat-input-field {
+  max-width: 720px;
+}

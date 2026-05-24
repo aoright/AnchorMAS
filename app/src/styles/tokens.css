@@ -1,0 +1,140 @@
+/* ========== AnchorMAS · Shared Design Tokens ==========
+ * 共享：颜色 / 字体 / 字号 / 圆角 / keyframes
+ * 端特有的尺寸（sidebar 宽、tabbar 高、safe-area）在各 layout 自己的 css 里
+ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  /* —— Paper palette (Light · standard neutral) —— */
+  --paper:        #f5f5f7;
+  --paper-2:      #ececef;
+  --paper-deep:   #dcdce0;
+
+  /* —— Ink —— */
+  --ink:          #1a1a1c;
+  --ink-2:        #3a3a3e;
+  --ink-3:        #6e6e72;
+  --ink-4:        #a3a3a8;
+
+  /* —— Hairlines —— */
+  --hair:         rgba(0, 0, 0, 0.12);
+  --hair-soft:    rgba(0, 0, 0, 0.06);
+  --hair-strong:  rgba(0, 0, 0, 0.22);
+
+  /* —— Glass —— */
+  --glass:        rgba(245, 245, 247, 0.82);
+
+  /* —— Accent: terracotta —— */
+  --accent:       #b8472b;
+  --accent-deep:  #8a3320;
+  --accent-soft:  rgba(184, 71, 43, 0.10);
+
+  /* —— Secondary signals —— */
+  --signal-amber: #c8821e;
+  --signal-calm:  #2c4a40;
+  --signal-live:  #5f7d35;
+
+  /* —— Fonts —— */
+  --f-display: "Fraunces", "Noto Serif SC", "Songti SC", Georgia, serif;
+  --f-body:    "Schibsted Grotesk", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --f-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --f-cn:      "Noto Serif SC", "Songti SC", "Source Han Serif SC", serif;
+
+  /* —— Type scale —— */
+  --t-xxs: 10px;
+  --t-xs:  11px;
+  --t-sm:  13px;
+  --t-md:  15px;
+  --t-lg:  17px;
+  --t-xl:  22px;
+  --t-2xl: 30px;
+  --t-3xl: 42px;
+
+  /* —— Radius —— */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+}
+
+html, body, #root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: var(--t-md);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11", "tnum";
+}
+
+button {
+  font-family: inherit;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+a { color: inherit; text-decoration: none; }
+
+input, textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+/* —— Common keyframes —— */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(95, 125, 53, 0.45); }
+  50%      { box-shadow: 0 0 0 4px rgba(95, 125, 53, 0); }
+}
+@keyframes dropIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ==================== Dark theme ==================== */
+[data-theme="dark"] {
+  --paper:        #1c1c1e;
+  --paper-2:      #2a2a2c;
+  --paper-deep:   #0e0e10;
+
+  --ink:          #f2f2f4;
+  --ink-2:        #c8c8cc;
+  --ink-3:        #8e8e93;
+  --ink-4:        #5e5e63;
+
+  --hair:         rgba(255, 255, 255, 0.14);
+  --hair-soft:    rgba(255, 255, 255, 0.07);
+  --hair-strong:  rgba(255, 255, 255, 0.24);
+
+  --glass:        rgba(28, 28, 30, 0.78);
+
+  --accent:       #e06a5a;
+  --accent-deep:  #b8472b;
+  --accent-soft:  rgba(224, 106, 90, 0.14);
+
+  --signal-amber: #e0a050;
+  --signal-calm:  #4f8a78;
+  --signal-live:  #88b063;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
