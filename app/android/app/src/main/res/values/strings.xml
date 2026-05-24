@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AnchorMAS</string>
+    <string name="title_activity_main">AnchorMAS</string>
+    <string name="package_name">com.pandaax.anchormas</string>
+    <string name="custom_url_scheme">com.pandaax.anchormas</string>
+</resources>

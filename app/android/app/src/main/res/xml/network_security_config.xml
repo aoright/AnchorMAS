@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 全局允许 cleartext (HTTP) — 后端是 http://47.97.127.223:3200 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <!-- 显式列出后端域，方便后续收紧 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">47.97.127.223</domain>
+    </domain-config>
+</network-security-config>
