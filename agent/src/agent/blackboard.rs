@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
@@ -38,24 +38,46 @@ pub enum AgentMessage {
 }
 
 pub struct Blackboard {
-    pub tx: broadcast::Sender<AgentMessage>,
     pub active_count: Arc<AtomicUsize>,
     pub idle_notify: Arc<Notify>,
     pub llm_semaphore: Arc<tokio::sync::Semaphore>, // Shared LLM concurrency limit
     pub processing_events: Arc<tokio::sync::Mutex<Vec<(FilteredEvent, Vec<f32>)>>>, // Active events currently in pipeline
     pub merged_source_urls: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>, // Merged URLs mapping
+    
+    // MPSC Senders
+    #[allow(dead_code)]
+    pub gatekeeper_tx: mpsc::Sender<AgentMessage>,
+    pub dedup_tx: mpsc::Sender<AgentMessage>,
+    pub analyst_tx: mpsc::Sender<AgentMessage>,
+    pub peer_tx: mpsc::Sender<AgentMessage>,
+    pub critic_tx: mpsc::Sender<AgentMessage>,
+    pub refiner_tx: mpsc::Sender<AgentMessage>,
+    pub progress_tx: mpsc::Sender<AgentMessage>,
 }
 
 impl Blackboard {
-    pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(2000);
+    pub fn new(
+        gatekeeper_tx: mpsc::Sender<AgentMessage>,
+        dedup_tx: mpsc::Sender<AgentMessage>,
+        analyst_tx: mpsc::Sender<AgentMessage>,
+        peer_tx: mpsc::Sender<AgentMessage>,
+        critic_tx: mpsc::Sender<AgentMessage>,
+        refiner_tx: mpsc::Sender<AgentMessage>,
+        progress_tx: mpsc::Sender<AgentMessage>,
+    ) -> Self {
         Self {
-            tx,
             active_count: Arc::new(AtomicUsize::new(0)),
             idle_notify: Arc::new(Notify::new()),
             llm_semaphore: Arc::new(tokio::sync::Semaphore::new(5)), // Safe 5 concurrent LLM calls
             processing_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             merged_source_urls: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            gatekeeper_tx,
+            dedup_tx,
+            analyst_tx,
+            peer_tx,
+            critic_tx,
+            refiner_tx,
+            progress_tx,
         }
     }
 
@@ -132,7 +154,7 @@ impl Blackboard {
 /// Listens for RawArticleAdded, buffers them, runs filter_batch concurrently, and emits FilteredEventAdded.
 pub async fn start_gatekeeper(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
     config: Arc<Config>,
@@ -148,7 +170,7 @@ pub async fn start_gatekeeper(
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
-                    Ok(AgentMessage::RawArticleAdded(doc)) => {
+                    Some(AgentMessage::RawArticleAdded(doc)) => {
                         buffer.push(doc);
                         if buffer.len() >= 10 {
                             let batch = std::mem::take(&mut buffer);
@@ -164,7 +186,7 @@ pub async fn start_gatekeeper(
                             spawn_handles.push(handle);
                         }
                     }
-                    Ok(AgentMessage::AllScoutingDone) => {
+                    Some(AgentMessage::AllScoutingDone) => {
                         if !buffer.is_empty() {
                             let batch = std::mem::take(&mut buffer);
                             let blackboard_clone = blackboard.clone();
@@ -180,10 +202,7 @@ pub async fn start_gatekeeper(
                         }
                         break;
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(dropped = n, "Gatekeeper lagged behind broadcast channel, messages dropped");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
+                    None => {
                         break;
                     }
                     _ => {}
@@ -226,7 +245,8 @@ async fn process_gatekeeper_batch(
             let _ = super::parliament::log_task_outcome(pool, "filter", true).await;
             tracing::info!("Gatekeeper filtered batch of {}: found {} events", batch_len, events.len());
             // Decrement work count for the raw documents resolved
-            for _ in 0..batch_len {
+            for doc in &batch {
+                let _ = blackboard.progress_tx.send(AgentMessage::RawArticleAdded(doc.clone())).await;
                 blackboard.decrement_work();
             }
             // Perform intra-batch event semantic de-duplication
@@ -234,13 +254,15 @@ async fn process_gatekeeper_batch(
             // Increment and emit for the filtered events created
             blackboard.increment_work(events.len());
             for event in events {
-                let _ = blackboard.tx.send(AgentMessage::FilteredEventAdded(event));
+                let _ = blackboard.dedup_tx.send(AgentMessage::FilteredEventAdded(event.clone())).await;
+                let _ = blackboard.progress_tx.send(AgentMessage::FilteredEventAdded(event)).await;
             }
         }
         Err(e) => {
             let _ = super::parliament::log_task_outcome(pool, "filter", false).await;
             tracing::error!("Gatekeeper failed to filter batch of {}: {}", batch_len, e);
-            for _ in 0..batch_len {
+            for doc in &batch {
+                let _ = blackboard.progress_tx.send(AgentMessage::RawArticleAdded(doc.clone())).await;
                 blackboard.decrement_work();
             }
         }
@@ -252,14 +274,14 @@ async fn process_gatekeeper_batch(
 /// and either merges them (ConsensusReached) or emits AnalysisReady for unique events.
 pub async fn start_deduplicator(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     pool: sqlx::SqlitePool,
     qdrant: Option<qdrant_client::Qdrant>,
     config: Arc<Config>,
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::FilteredEventAdded(event)) => {
+            Some(AgentMessage::FilteredEventAdded(event)) => {
                 let pool_clone = pool.clone();
                 let qdrant_clone = qdrant.clone();
                 let config_clone = config.clone();
@@ -321,7 +343,7 @@ pub async fn start_deduplicator(
                                     confidence: confidence as i32,
                                     analysis,
                                 };
-                                let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(updated_event));
+                                let _ = blackboard_clone.progress_tx.send(AgentMessage::ConsensusReached(updated_event)).await;
                                 blackboard_clone.remove_event(&event.id).await;
                                 blackboard_clone.decrement_work();
                                 found_historical = true;
@@ -330,14 +352,11 @@ pub async fn start_deduplicator(
                     }
 
                     if !found_historical {
-                        let _ = blackboard_clone.tx.send(AgentMessage::AnalysisReady(event));
+                        let _ = blackboard_clone.analyst_tx.send(AgentMessage::AnalysisReady(event)).await;
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "Deduplicator lagged, messages dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+            None => break,
             _ => {}
         }
     }
@@ -348,13 +367,13 @@ pub async fn start_deduplicator(
 /// Listens for AnalysisReady, dispatches specialized analysis concurrently.
 pub async fn start_analyst_coordinator(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::AnalysisReady(event)) => {
+            Some(AgentMessage::AnalysisReady(event)) => {
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
@@ -366,7 +385,8 @@ pub async fn start_analyst_coordinator(
                     };
                     match analysis_result {
                         Ok(analyzed) => {
-                            let _ = blackboard_clone.tx.send(AgentMessage::AnalysisCompleted(analyzed));
+                            let _ = blackboard_clone.peer_tx.send(AgentMessage::AnalysisCompleted(analyzed.clone())).await;
+                            let _ = blackboard_clone.progress_tx.send(AgentMessage::AnalysisCompleted(analyzed)).await;
                         }
                         Err(e) => {
                             tracing::error!("Analyst failed for event {}: {}, using defaults", event.id, e);
@@ -383,15 +403,13 @@ pub async fn start_analyst_coordinator(
                                 confidence: 2,
                                 analysis: "Analysis unavailable due to API error.".to_string(),
                             };
-                            let _ = blackboard_clone.tx.send(AgentMessage::AnalysisCompleted(fallback));
+                            let _ = blackboard_clone.peer_tx.send(AgentMessage::AnalysisCompleted(fallback.clone())).await;
+                            let _ = blackboard_clone.progress_tx.send(AgentMessage::AnalysisCompleted(fallback)).await;
                         }
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "Analyst coordinator lagged, messages dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+            None => break,
             _ => {}
         }
     }
@@ -491,13 +509,13 @@ pub async fn select_peer_reviewer(
 /// Listens for AnalysisCompleted, runs cross-domain review, and emits PeerReviewCompleted.
 pub async fn start_peer_reviewer(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::AnalysisCompleted(event)) => {
+            Some(AgentMessage::AnalysisCompleted(event)) => {
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
@@ -518,17 +536,14 @@ pub async fn start_peer_reviewer(
                         }
                     };
 
-                    let _ = blackboard_clone.tx.send(AgentMessage::PeerReviewCompleted {
+                    let _ = blackboard_clone.critic_tx.send(AgentMessage::PeerReviewCompleted {
                         event,
                         peer_reviewer: peer_role_id,
                         peer_comments: review_comments,
-                    });
+                    }).await;
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "Peer reviewer lagged, messages dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+            None => break,
             _ => {}
         }
     }
@@ -539,13 +554,13 @@ pub async fn start_peer_reviewer(
 /// Listens for PeerReviewCompleted and RefinementCompleted. Runs fact checks, adjust confidence, and decides approved/rejected.
 pub async fn start_critic(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::PeerReviewCompleted { event, peer_reviewer, peer_comments }) => {
+            Some(AgentMessage::PeerReviewCompleted { event, peer_reviewer, peer_comments }) => {
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
@@ -571,7 +586,7 @@ pub async fn start_critic(
                                 if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
                                     final_event.source_urls = urls;
                                 }
-                                let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                                let _ = blackboard_clone.progress_tx.send(AgentMessage::ConsensusReached(final_event)).await;
                                 blackboard_clone.remove_event(&event.id).await;
                                 blackboard_clone.decrement_work();
                             } else {
@@ -601,28 +616,28 @@ pub async fn start_critic(
                                     let _ = super::parliament::log_task_outcome(&pool_clone, "filter", true).await;
                                 }
 
-                                let _ = blackboard_clone.tx.send(AgentMessage::VerifierVerdict {
+                                let _ = blackboard_clone.refiner_tx.send(AgentMessage::VerifierVerdict {
                                     event,
                                     approved: false,
                                     critique_notes,
                                     confidence_adjustment: conf_adj,
-                                });
+                                }).await;
                             }
                         }
                         Err(e) => {
                             tracing::error!("Critic pass 1 failed for event {}: {}, bypassing", event.id, e);
                             let mut final_event = event.clone();
                             if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
-                                final_event.source_urls = urls;
+                                  final_event.source_urls = urls;
                             }
-                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            let _ = blackboard_clone.progress_tx.send(AgentMessage::ConsensusReached(final_event)).await;
                             blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
                     }
                 });
             }
-            Ok(AgentMessage::RefinementCompleted(event)) => {
+            Some(AgentMessage::RefinementCompleted(event)) => {
                 // Critic Pass 2 (final approval/rejection)
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
@@ -658,7 +673,7 @@ pub async fn start_critic(
                             if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
                                 final_event.source_urls = urls;
                             }
-                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            let _ = blackboard_clone.progress_tx.send(AgentMessage::ConsensusReached(final_event)).await;
                             blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
@@ -668,17 +683,14 @@ pub async fn start_critic(
                             if let Some(urls) = blackboard_clone.get_merged_urls(&event.id).await {
                                 final_event.source_urls = urls;
                             }
-                            let _ = blackboard_clone.tx.send(AgentMessage::ConsensusReached(final_event));
+                            let _ = blackboard_clone.progress_tx.send(AgentMessage::ConsensusReached(final_event)).await;
                             blackboard_clone.remove_event(&event.id).await;
                             blackboard_clone.decrement_work();
                         }
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "Critic lagged, messages dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+            None => break,
             _ => {}
         }
     }
@@ -706,13 +718,13 @@ async fn fetch_raw_content(pool: &sqlx::SqlitePool, event: &AnalyzedEvent) -> St
 /// Listens for VerifierVerdict (approved=false), refines the analysis, runs prompt evolution immediately, and emits RefinementCompleted.
 pub async fn start_refiner(
     blackboard: Arc<Blackboard>,
-    mut rx: broadcast::Receiver<AgentMessage>,
+    mut rx: mpsc::Receiver<AgentMessage>,
     client: DoubaoClient,
     pool: sqlx::SqlitePool,
 ) {
     loop {
         match rx.recv().await {
-            Ok(AgentMessage::VerifierVerdict { event, approved: false, critique_notes, confidence_adjustment: _ }) => {
+            Some(AgentMessage::VerifierVerdict { event, approved: false, critique_notes, confidence_adjustment: _ }) => {
                 let client_clone = client.clone();
                 let pool_clone = pool.clone();
                 let blackboard_clone = blackboard.clone();
@@ -736,10 +748,10 @@ pub async fn start_refiner(
                                 Ok(updates) => {
                                     for update in updates {
                                         tracing::info!(role = %update.target_role_id, "Real-time playbook evolution succeeded!");
-                                        let _ = blackboard_clone.tx.send(AgentMessage::PlaybookUpdated {
+                                        let _ = blackboard_clone.progress_tx.send(AgentMessage::PlaybookUpdated {
                                             role_id: update.target_role_id,
                                             new_guidelines: update.new_guidelines,
-                                        });
+                                        }).await;
                                     }
                                 }
                                 Err(e) => {
@@ -747,21 +759,19 @@ pub async fn start_refiner(
                                 }
                             }
 
-                            let _ = blackboard_clone.tx.send(AgentMessage::RefinementCompleted(refined_event));
+                            let _ = blackboard_clone.critic_tx.send(AgentMessage::RefinementCompleted(refined_event)).await;
                         }
                         Err(e) => {
+                            let _ = super::parliament::log_task_outcome(&pool_clone, "refiner", false).await;
                             tracing::error!("Refinement failed for event {}: {}, returning original", event.id, e);
                             let mut fallback = event.clone();
                             fallback.analysis = format!("{}\n[核查失败] 修正特工异常：{}", fallback.analysis, e);
-                            let _ = blackboard_clone.tx.send(AgentMessage::RefinementCompleted(fallback));
+                            let _ = blackboard_clone.critic_tx.send(AgentMessage::RefinementCompleted(fallback)).await;
                         }
                     }
                 });
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "Refiner lagged, messages dropped");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
+            None => break,
             _ => {}
         }
     }

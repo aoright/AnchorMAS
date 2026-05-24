@@ -500,6 +500,7 @@ pub struct ChatMessageResponse {
 #[derive(Deserialize)]
 pub struct SendMessageRequest {
     pub message: String,
+    pub stream: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -671,7 +672,7 @@ pub async fn send_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     // 1. Fetch session info
     let session = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
         "SELECT id, title, context_type, context_id, created_at, updated_at FROM chat_sessions WHERE id = ?",
@@ -851,6 +852,153 @@ pub async fn send_message(
         &state.config.ark_endpoint_id,
         &state.config.llm_api_url,
     );
+
+    if payload.stream.unwrap_or(false) {
+        let user_msg_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, 'user', ?)",
+        )
+        .bind(&user_msg_id)
+        .bind(&session_id)
+        .bind(&payload.message)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to save user message");
+            internal_error("Database error")
+        })?;
+
+        let raw_stream = doubao
+            .chat_stream(&system_prompt, &payload.message)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Doubao chat API call failed");
+                internal_error("AI service unavailable")
+            })?;
+
+        use futures_util::StreamExt;
+        let raw_stream = Box::pin(raw_stream);
+        let ai_msg_id = Uuid::new_v4().to_string();
+
+        let s = futures_util::stream::unfold(
+            (raw_stream, String::new(), false, false, state.pool.clone(), session_id.clone(), payload.message.clone(), ai_msg_id.clone(), user_msg_id.clone()),
+            move |(mut stream, mut full_response, sent_meta, mut done, pool, session_id, user_message, ai_msg_id, user_msg_id)| async move {
+                if done {
+                    return None;
+                }
+                if !sent_meta {
+                    let meta = serde_json::json!({
+                        "type": "metadata",
+                        "user_message_id": user_msg_id,
+                        "ai_message_id": ai_msg_id,
+                        "session_id": session_id
+                    }).to_string();
+                    let chunk = format!("data: {}\n\n", meta);
+                    let bytes = axum::body::Bytes::from(chunk);
+                    return Some((
+                        Ok::<_, std::io::Error>(bytes),
+                        (stream, full_response, true, done, pool, session_id, user_message, ai_msg_id, user_msg_id)
+                    ));
+                }
+
+                match stream.next().await {
+                    Some(Ok(text)) => {
+                        full_response.push_str(&text);
+                        let chunk = serde_json::json!({
+                            "type": "content",
+                            "content": text
+                        }).to_string();
+                        let bytes = axum::body::Bytes::from(format!("data: {}\n\n", chunk));
+                        Some((
+                            Ok::<_, std::io::Error>(bytes),
+                            (stream, full_response, sent_meta, done, pool, session_id, user_message, ai_msg_id, user_msg_id)
+                        ))
+                    }
+                    Some(Err(e)) => {
+                        done = true;
+                        let err = std::io::Error::new(std::io::ErrorKind::Other, e);
+                        Some((
+                            Err(err),
+                            (stream, full_response, sent_meta, done, pool, session_id, user_message, ai_msg_id, user_msg_id)
+                        ))
+                    }
+                    None => {
+                        done = true;
+                        let full_resp_clone = full_response.clone();
+                        let pool_clone = pool.clone();
+                        let session_id_clone = session_id.clone();
+                        let user_message_clone = user_message.clone();
+                        let ai_msg_id_clone = ai_msg_id.clone();
+                        
+                        tokio::spawn(async move {
+                            let _ = sqlx::query(
+                                "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, 'assistant', ?)",
+                            )
+                            .bind(&ai_msg_id_clone)
+                            .bind(&session_id_clone)
+                            .bind(&full_resp_clone)
+                            .execute(&pool_clone)
+                            .await;
+
+                            let msg_count = sqlx::query_scalar::<_, i64>(
+                                "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?",
+                            )
+                            .bind(&session_id_clone)
+                            .fetch_one(&pool_clone)
+                            .await
+                            .unwrap_or(0);
+
+                            if msg_count <= 2 {
+                                let auto_title = if user_message_clone.len() > 30 {
+                                    let end = user_message_clone.char_indices().nth(30).map(|(i, _)| i).unwrap_or(user_message_clone.len());
+                                    format!("{}...", &user_message_clone[..end])
+                                } else {
+                                    user_message_clone.clone()
+                                };
+                                let _ = sqlx::query(
+                                    "UPDATE chat_sessions SET title = ?, updated_at = datetime('now') WHERE id = ? AND title IN ('', '自由对话', '新闻对话', '简报对话')",
+                                )
+                                .bind(&auto_title)
+                                .bind(&session_id_clone)
+                                .execute(&pool_clone)
+                                .await;
+                            } else {
+                                let _ = sqlx::query(
+                                    "UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?",
+                                )
+                                .bind(&session_id_clone)
+                                .execute(&pool_clone)
+                                .await;
+                            }
+                        });
+
+                        let done_chunk = serde_json::json!({
+                            "type": "done"
+                        }).to_string();
+                        let bytes = axum::body::Bytes::from(format!("data: {}\n\n", done_chunk));
+                        Some((
+                            Ok::<_, std::io::Error>(bytes),
+                            (stream, full_response, sent_meta, done, pool, session_id, user_message, ai_msg_id, user_msg_id)
+                        ))
+                    }
+                }
+            }
+        );
+
+        let body = axum::body::Body::from_stream(s);
+        let response = axum::response::Response::builder()
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("Connection", "keep-alive")
+            .body(body)
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to build SSE response");
+                internal_error("Failed to build stream response")
+            })?;
+        
+        return Ok(response.into_response());
+    }
+
     let ai_response = doubao
         .chat(&system_prompt, &payload.message, false)
         .await
@@ -959,7 +1107,7 @@ pub async fn send_message(
             content: ai_msg.3,
             created_at: ai_msg.4,
         },
-    }))
+    }).into_response())
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1510,7 +1658,7 @@ pub async fn synthesize_speech(
     Json(payload): Json<TtsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     use base64::Engine;
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
 
     if payload.text.is_empty() {
@@ -1596,86 +1744,91 @@ pub async fn synthesize_speech(
             internal_error("TTS task submission failed")
         })?;
 
-    // Collect audio data
-    let mut audio_data: Vec<u8> = Vec::new();
-    let mut completed = false;
+    // Create channel for streaming response chunks
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
 
-    while let Some(msg_result) = ws_stream.next().await {
-        match msg_result {
-            Ok(Message::Text(text_msg)) => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text_msg) {
-                    let event = json
-                        .get("header")
-                        .and_then(|h| h.get("event"))
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("");
+    // Spawn a background task to read from WebSocket and pipe to channel
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+        
+        while let Some(msg_result) = ws_stream.next().await {
+            match msg_result {
+                Ok(Message::Text(text_msg)) => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text_msg) {
+                        let event = json
+                            .get("header")
+                            .and_then(|h| h.get("event"))
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("");
 
-                    match event {
-                        "task-started" => {
-                            tracing::debug!("TTS task started: {}", task_id);
-                        }
-                        "result-generated" => {
-                            // Audio data in payload.output.audio (base64)
-                            if let Some(audio_b64) = json
-                                .get("payload")
-                                .and_then(|p| p.get("output"))
-                                .and_then(|o| o.get("audio"))
-                                .and_then(|a| a.as_str())
-                            {
-                                if let Ok(chunk) = base64::engine::general_purpose::STANDARD.decode(audio_b64) {
-                                    audio_data.extend_from_slice(&chunk);
+                        match event {
+                            "result-generated" => {
+                                if let Some(audio_b64) = json
+                                    .get("payload")
+                                    .and_then(|p| p.get("output"))
+                                    .and_then(|o| o.get("audio"))
+                                    .and_then(|a| a.as_str())
+                                {
+                                    if let Ok(chunk) = base64::engine::general_purpose::STANDARD.decode(audio_b64) {
+                                        if tx.send(Ok(axum::body::Bytes::from(chunk))).await.is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
+                            "task-finished" => {
+                                break;
+                            }
+                            "task-failed" => {
+                                let error_msg = json
+                                    .get("header")
+                                    .and_then(|h| h.get("error_message"))
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("Unknown TTS error");
+                                tracing::error!("TTS task failed: {}", error_msg);
+                                let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, error_msg))).await;
+                                break;
+                            }
+                            _ => {}
                         }
-                        "task-finished" => {
-                            completed = true;
-                            break;
-                        }
-                        "task-failed" => {
-                            let error_msg = json
-                                .get("header")
-                                .and_then(|h| h.get("error_message"))
-                                .and_then(|e| e.as_str())
-                                .unwrap_or("Unknown TTS error");
-                            tracing::error!("TTS task failed: {}", error_msg);
-                            let _ = ws_stream.close(None).await;
-                            return Err(internal_error(&format!("TTS failed: {}", error_msg)));
-                        }
-                        _ => {}
                     }
                 }
+                Ok(Message::Binary(bin_data)) => {
+                    if tx.send(Ok(axum::body::Bytes::from(bin_data))).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "WebSocket error during TTS");
+                    let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e))).await;
+                    break;
+                }
+                _ => {}
             }
-            Ok(Message::Binary(bin_data)) => {
-                // Some versions send raw binary audio chunks
-                audio_data.extend_from_slice(&bin_data);
-            }
-            Ok(Message::Close(_)) => {
-                break;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "WebSocket error during TTS");
-                break;
-            }
-            _ => {}
         }
-    }
+        let _ = ws_stream.close(None).await;
+    });
 
-    let _ = ws_stream.close(None).await;
+    // Wrap the receiver in an async Stream
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(res) => Some((res, rx)),
+            None => None,
+        }
+    });
 
-    if audio_data.is_empty() && !completed {
-        return Err(internal_error("TTS returned no audio data"));
-    }
+    let body = axum::body::Body::from_stream(stream);
 
-    // Return audio as response
+    // Return streaming response
     Ok((
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_TYPE, "audio/mpeg"),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                "inline; filename=\"tts_output.mp3\"",
-            ),
+            (axum::http::header::TRANSFER_ENCODING, "chunked"),
         ],
-        audio_data,
+        body,
     ))
 }

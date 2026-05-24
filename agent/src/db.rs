@@ -280,6 +280,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             sponsor_role_id  TEXT,
             tasks_completed  INTEGER NOT NULL DEFAULT 0,
             tasks_failed     INTEGER NOT NULL DEFAULT 0,
+            tasks_completed_last_dist INTEGER NOT NULL DEFAULT 0,
             token_cost       INTEGER NOT NULL DEFAULT 0,
             compute_credits  INTEGER NOT NULL DEFAULT 100000,
             faction          TEXT NOT NULL DEFAULT 'Neutral',
@@ -293,6 +294,13 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("Failed to create agent_parliament_registry table")?;
+
+    // Migration: ensure tasks_completed_last_dist exists for existing databases
+    let _ = sqlx::query(
+        "ALTER TABLE agent_parliament_registry ADD COLUMN tasks_completed_last_dist INTEGER NOT NULL DEFAULT 0;"
+    )
+    .execute(pool)
+    .await;
 
     sqlx::query(
         r#"
@@ -347,14 +355,52 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .await
     .context("Failed to create parliament_ledger table")?;
 
-    // Seed/backfill the registry with the default/existing agents
+    // Create Regression Test Suite & Structured Rules tables
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS regression_test_suite (
+            event_id    TEXT PRIMARY KEY,
+            category    TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            summary     TEXT NOT NULL,
+            analysis    TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create regression_test_suite table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_playbook_rules (
+            rule_id     TEXT PRIMARY KEY,
+            role_id     TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            reasoning   TEXT,
+            version     INTEGER NOT NULL DEFAULT 1,
+            status      TEXT NOT NULL DEFAULT 'active',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(role_id) REFERENCES agent_playbook(role_id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to create agent_playbook_rules table")?;
+
+    // Seed/backfill the registry with the default/existing agents and 6 factions
     sqlx::query(
         r#"
         INSERT OR IGNORE INTO agent_parliament_registry (role_id, status, faction)
         SELECT role_id, 'active', 
                CASE 
-                   WHEN role_id IN ('analyst_competition', 'analyst_platform') THEN 'Efficiency'
-                   WHEN role_id IN ('analyst_product', 'analyst_social') THEN 'Creativity'
+                   WHEN role_id IN ('analyst_competition', 'filter') THEN 'Efficiency'
+                   WHEN role_id IN ('analyst_product', 'designer') THEN 'Creativity'
+                   WHEN role_id IN ('critic', 'analyst_regulation') THEN 'Prudence'
+                   WHEN role_id IN ('refiner', 'analyst_platform') THEN 'Quality'
+                   WHEN role_id IN ('synthesizer', 'analyst_social') THEN 'Agile'
                    ELSE 'Neutral'
                END
         FROM agent_playbook;
@@ -363,6 +409,66 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("Failed to backfill agent_parliament_registry")?;
+
+    // Update existing agents to the new 6-faction distribution
+    let _ = sqlx::query(
+        r#"UPDATE agent_parliament_registry SET faction = 
+           CASE 
+               WHEN role_id IN ('analyst_competition', 'filter') THEN 'Efficiency'
+               WHEN role_id IN ('analyst_product', 'designer') THEN 'Creativity'
+               WHEN role_id IN ('critic', 'analyst_regulation') THEN 'Prudence'
+               WHEN role_id IN ('refiner', 'analyst_platform') THEN 'Quality'
+               WHEN role_id IN ('synthesizer', 'analyst_social') THEN 'Agile'
+               ELSE 'Neutral'
+           END"#
+    )
+    .execute(pool)
+    .await;
+
+    // Backfill agent_playbook_rules from existing agent_playbook.guidelines
+    if let Ok(playbooks) = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT role_id, guidelines, version FROM agent_playbook WHERE guidelines IS NOT NULL AND guidelines <> ''"
+    )
+    .fetch_all(pool)
+    .await {
+        for (role_id, guidelines, version) in playbooks {
+            if let Ok(count) = sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*) FROM agent_playbook_rules WHERE role_id = ?"
+            )
+            .bind(&role_id)
+            .fetch_one(pool)
+            .await {
+                if count.0 == 0 {
+                    for line in guidelines.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let content = if trimmed.starts_with("- ") {
+                            &trimmed[2..]
+                        } else if trimmed.starts_with('-') {
+                            &trimmed[1..]
+                        } else {
+                            trimmed
+                        };
+                        if content.is_empty() {
+                            continue;
+                        }
+                        let rule_id = uuid::Uuid::new_v4().to_string();
+                        let _ = sqlx::query(
+                            "INSERT INTO agent_playbook_rules (rule_id, role_id, content, version, status) VALUES (?, ?, ?, ?, 'active')"
+                        )
+                        .bind(&rule_id)
+                        .bind(&role_id)
+                        .bind(content)
+                        .bind(version)
+                        .execute(pool)
+                        .await;
+                    }
+                }
+            }
+        }
+    }
 
     sqlx::query(
         r#"

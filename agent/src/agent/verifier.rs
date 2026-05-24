@@ -319,6 +319,18 @@ pub async fn run_critic_pass(
     doc_content: &str,
     peer_comments: Option<&str>,
 ) -> Result<(bool, String, i32)> {
+    let res = run_critic_pass_inner(client, pool, event, doc_content, peer_comments).await;
+    let _ = super::parliament::log_task_outcome(pool, "critic", res.is_ok()).await;
+    res
+}
+
+async fn run_critic_pass_inner(
+    client: &DoubaoClient,
+    pool: &sqlx::SqlitePool,
+    event: &AnalyzedEvent,
+    doc_content: &str,
+    peer_comments: Option<&str>,
+) -> Result<(bool, String, i32)> {
     let default_critic_prompt = get_critic_prompt();
     let critic_system_prompt = super::get_agent_prompt(pool, "critic", default_critic_prompt).await;
 

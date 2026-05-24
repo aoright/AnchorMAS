@@ -72,12 +72,41 @@ async fn set_meta_rule(pool: &SqlitePool, key: &str, value: &str) -> Result<()> 
 pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> Result<String> {
     tracing::info!("Starting Agent Parliament: Stagnation Audit Epoch...");
 
-    // Find all custom analysts that are currently active or on parole
+    // Clean up expired suspension agents (older than 24 hours)
+    let expired_suspensions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.role_id, p.name FROM agent_parliament_registry r \
+         JOIN agent_playbook p ON r.role_id = p.role_id \
+         WHERE r.status = 'suspension' AND r.last_active_at < datetime('now', '-24 hours')"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for (expired_id, expired_name) in expired_suspensions {
+        tracing::info!(role = %expired_id, name = %expired_name, "Suspension expired (24h limit reached), physically executing deletion");
+        
+        let details = serde_json::json!({
+            "verdict": "execute",
+            "note": "暂缓执行期（24小时）结束，未获得人类特赦，执行物理删除。"
+        });
+        let _ = log_parliament_event(pool, "trial_verdict", Some(&expired_id), &details.to_string()).await;
+
+        let _ = sqlx::query("DELETE FROM agent_parliament_registry WHERE role_id = ?")
+            .bind(&expired_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM agent_playbook WHERE role_id = ?")
+            .bind(&expired_id)
+            .execute(pool)
+            .await;
+    }
+
+    // Find all custom analysts that are currently active, on parole, or bankrupt
     let active_agents: Vec<ParliamentAgent> = sqlx::query_as(
         r#"SELECT r.role_id, name, status, sponsor_role_id, tasks_completed, tasks_failed, token_cost, compute_credits, faction, r.created_at, last_active_at, last_evolved_at
            FROM agent_parliament_registry r
            JOIN agent_playbook p ON r.role_id = p.role_id
-           WHERE r.role_id LIKE 'analyst_%' AND r.status IN ('active', 'parole')"#
+           WHERE r.role_id LIKE 'analyst_%' AND r.status IN ('active', 'parole', 'bankruptcy')"#
     )
     .fetch_all(pool)
     .await?;
@@ -88,6 +117,7 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
         .unwrap_or(5);
 
     let mut accused_agents = Vec::new();
+    let mut trial_results = Vec::new();
 
     // Core roles to exempt from deletion (can be paroled or merged but never executed)
     let core_roles = vec![
@@ -145,6 +175,20 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
             }
         }
 
+        // Accusation criteria 4: Bankruptcy state (lack of recovery)
+        if agent.status == "bankruptcy" {
+            accusation_reasons.push("Persistent bankruptcy state with no recovery actions".to_string());
+        }
+
+        // Accusation criteria 5: Prolonged inactivity (no tasks for 3 days or more)
+        let last_active = chrono::NaiveDateTime::parse_from_str(&agent.last_active_at, "%Y-%m-%d %H:%M:%S")
+            .unwrap_or_else(|_| chrono::Utc::now().naive_utc());
+        let now = chrono::Utc::now().naive_utc();
+        let idle_days = now.signed_duration_since(last_active).num_days();
+        if idle_days >= 3 {
+            accusation_reasons.push(format!("Prolonged inactivity (no tasks executed for {} days)", idle_days));
+        }
+
         if !accusation_reasons.is_empty() {
             accused_agents.push((agent.clone(), accusation_reasons.join(", ")));
         }
@@ -154,10 +198,59 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
         return Ok("没有检测到任何符合审判条件的停滞智能体。".to_string());
     }
 
-    let mut trial_results = Vec::new();
-
-    for (accused, reason) in accused_agents {
+     for (accused, reason) in accused_agents {
         tracing::info!(role = %accused.role_id, "Triggering The Trial of Stagnation for agent");
+
+        // Query historical trial count in parliament_ledger
+        let trial_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM parliament_ledger WHERE event_type = 'trial_verdict' AND role_id = ?"
+        )
+        .bind(&accused.role_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+        // 1. Hard Check: Recidivism Limit (Bypass trial and directly eliminate/parole if trial_count >= 2)
+        if trial_count >= 2 {
+            let verdict = if core_roles.contains(&accused.role_id.as_str()) {
+                "Parole"
+            } else {
+                "Destroy"
+            };
+
+            let verdict_msg = match verdict {
+                "Parole" => {
+                    sqlx::query("UPDATE agent_parliament_registry SET status = 'parole', compute_credits = 50000, last_active_at = datetime('now') WHERE role_id = ?")
+                        .bind(&accused.role_id)
+                        .execute(pool)
+                        .await?;
+
+                    let details = serde_json::json!({
+                        "accusation": format!("{} (起诉次数 {} 次达到上限，直接宣判)", reason, trial_count + 1),
+                        "verdict": "parole",
+                        "note": "累犯惩罚：因进法庭次数达到或超过 3 次，直接判定 Parole 降维观察"
+                    });
+                    log_parliament_event(pool, "trial_verdict", Some(&accused.role_id), &details.to_string()).await?;
+                    format!("审判结果：累犯上线惩罚（Parole）。保留席位，信用积分限制为 50,000，进入 3 周期观察。")
+                }
+                _ => {
+                    sqlx::query("UPDATE agent_parliament_registry SET status = 'suspension', last_active_at = datetime('now') WHERE role_id = ?")
+                        .bind(&accused.role_id)
+                        .execute(pool)
+                        .await?;
+
+                    let details = serde_json::json!({
+                        "accusation": format!("{} (起诉次数 {} 次达到上限，直接宣判暂缓执行)", reason, trial_count + 1),
+                        "verdict": "suspension",
+                        "note": "累犯惩罚：因进法庭次数达到或超过 3 次，转为 24h 暂缓执行状态，待人类终审"
+                    });
+                    log_parliament_event(pool, "trial_verdict", Some(&accused.role_id), &details.to_string()).await?;
+                    format!("审判结果：累犯上线惩罚（Suspension）。该特工已进入死牢队列，等待 24h 人类 Veto 裁决。")
+                }
+            };
+            trial_results.push(format!("- 【{}】: {}", accused.name, verdict_msg));
+            continue;
+        }
 
         // 1. Accusation stage
         let accusation_detail = format!(
@@ -182,12 +275,53 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
         );
         let defense_statement = client.chat("你正在智能体沙盒法庭进行自我辩护。", &defense_prompt, false).await?;
 
-        // 3. Jury Voting stage
-        let jurors = vec![
-            ("critic", "事实与逻辑监督官"),
-            ("analyst_competition", "竞争动态分析特工"),
-            ("analyst_product", "产品趋势分析特工"),
+        // 3. Jury Voting stage: Dynamic selection with Conflict of Interest (COI) exclusion
+        let candidates: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT r.role_id, p.name FROM agent_parliament_registry r
+               JOIN agent_playbook p ON r.role_id = p.role_id
+               WHERE r.status IN ('active', 'parole')"#
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        let mut eligible_candidates: Vec<(String, String)> = candidates
+            .into_iter()
+            .filter(|(role_id, _)| {
+                role_id != &accused.role_id
+                    && Some(role_id) != accused.sponsor_role_id.as_ref()
+            })
+            .collect();
+
+        // Simple stable shuffle using a combination of role_id and a random UUID seed
+        let seed = Uuid::new_v4().to_string();
+        eligible_candidates.sort_by_cached_key(|(role_id, _)| {
+            let mut h = 0u64;
+            for b in format!("{}{}", role_id, seed).bytes() {
+                h = h.wrapping_mul(31).wrapping_add(b as u64);
+            }
+            h
+        });
+
+        // Ensure we have 3 jurors, pad with core agents if needed
+        let fallback_jurors = vec![
+            ("critic".to_string(), "事实与逻辑监督官".to_string()),
+            ("analyst_competition".to_string(), "竞争动态分析特工".to_string()),
+            ("analyst_product".to_string(), "产品趋势分析特工".to_string()),
         ];
+        
+        for fallback in fallback_jurors {
+            if eligible_candidates.len() >= 3 {
+                break;
+            }
+            if fallback.0 != accused.role_id 
+                && Some(&fallback.0) != accused.sponsor_role_id.as_ref()
+                && !eligible_candidates.iter().any(|(r_id, _)| r_id == &fallback.0) 
+            {
+                eligible_candidates.push(fallback);
+            }
+        }
+        eligible_candidates.truncate(3);
+        let jurors = eligible_candidates;
 
         let mut votes = Vec::new();
         let mut keep_count = 0;
@@ -198,9 +332,15 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
                 "你是一个正直理性的珠宝分析特工，目前担任议会法庭的【陪审团成员】（角色：【{}】）。\n\
                  你需要评审被起诉智能体【{}】的指控材料与自我辩护词。\n\n\
                  指控原因：{}\n\
+                 被指控者运行数据：任务完成数: {}, 任务失败数: {}, 累计Token花费: {}, 剩余额度: {}\n\
+                 被指控者历史出庭次数：{} 次\n\
                  辩护词：\n\
                  \"{}\"\n\n\
-                 请根据指控和辩护评估其潜在价值，给出你的表决意见：\n\
+                 重要评审准则：\n\
+                 - 事实审计：如果被起诉者的辩护词包含大量技术参数，但这些参数是编造的（与本期事件无关），应当判定其编造事实并投 Destroy。\n\
+                 - 履职审计：被指控者的历史任务完成数过低（如为0）或失败数高，说明其实际业务能力差或已闲置。必须根据数据进行投票，而不能仅凭其辩护词说辞。\n\
+                 - 累犯加权：如果其历史出庭次数大于0，说明其属于多次不称职或长期闲置特工。你的表决态度应当更倾向于 Destroy，以确保系统效率。\n\n\
+                 请评估并给出你的表决意见：\n\
                  1. 投票决定 (vote): Keep（保留/观察）或 Destroy（清除/合并）\n\
                  2. 价值评分 (score): 1到5分（5分最高，表示绝对不可替代；1分最低，表示完全无用或冗余）\n\
                  3. 理由 (reason): 50字以内的评语\n\n\
@@ -210,7 +350,7 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
                    \"score\": 1-5, \n\
                    \"reason\": \"你的评审理由\" \n\
                  }}",
-                juror_name, accused.name, reason, defense_statement
+                juror_name, accused.name, reason, accused.tasks_completed, accused.tasks_failed, accused.token_cost, accused.compute_credits, trial_count, defense_statement
             );
 
             let juror_system = get_agent_prompt(pool, juror_id, "你是一个客观公正的议会陪审团成员。").await;
@@ -235,12 +375,18 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
             }
         }
 
-        // Calculate average score
-        let avg_score = if !votes.is_empty() {
+        // Calculate average score with recidivism penalty
+        let mut avg_score = if !votes.is_empty() {
             score_sum as f64 / votes.len() as f64
         } else {
             2.0
         };
+
+        // Recidivism penalty: deduct 1.0 score if this is at least their second trial
+        if trial_count >= 1 {
+            avg_score -= 1.0;
+            tracing::info!(role = %accused.role_id, "Applying recidivism score penalty of -1.0 to average score: {}", avg_score);
+        }
 
         // Determine Verdict
         let verdict = if keep_count >= 2 || avg_score >= 3.5 {
@@ -324,19 +470,15 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
             }
             "Destroy" | _ => {
                 let last_words_prompt = format!(
-                    "你是一个即将被彻底消除的珠宝分析特工（角色：【{}】）。\n\
+                    "你是一个即将被消除的珠宝分析特工（角色：【{}】）。\n\
                      在被系统抹除之前，允许你留下一段‘经验闪存（Last Words Prompt）’写入全局知识库，供其他特工吸取教训，避免重蹈覆辙。\n\
                      请用100字以内写下你在这个细分领域最重要的一条分析建议或教训。\n\
                      直接输出闪存内容，不要有任何旁白。",
                     accused.name
                 );
-                let last_words = client.chat("你正在留下最后的遗言。", &last_words_prompt, false).await?;
+                let last_words = client.chat("你正在留下最后的遗言。", &last_words_prompt, false).await.unwrap_or_default();
 
-                sqlx::query("DELETE FROM agent_parliament_registry WHERE role_id = ?")
-                    .bind(&accused.role_id)
-                    .execute(pool)
-                    .await?;
-                sqlx::query("DELETE FROM agent_playbook WHERE role_id = ?")
+                sqlx::query("UPDATE agent_parliament_registry SET status = 'suspension', last_active_at = datetime('now') WHERE role_id = ?")
                     .bind(&accused.role_id)
                     .execute(pool)
                     .await?;
@@ -345,13 +487,13 @@ pub async fn run_stagnation_audit(pool: &SqlitePool, client: &DoubaoClient) -> R
                     "accusation": accusation_detail,
                     "defense": defense_statement,
                     "jury_votes": votes,
-                    "verdict": "destroy",
-                    "death_note": format!("被消除原因：在活跃度或成功率审计中被评定为冗余，且陪审团评分低（得分: {:.1}）。", avg_score),
+                    "verdict": "suspension",
+                    "death_note": format!("进入死牢原因：在活跃度或成功率审计中被评定为冗余，且陪审团评分低（得分: {:.1}），未通过法庭审计。", avg_score),
                     "last_words": last_words
                 });
                 log_parliament_event(pool, "trial_verdict", Some(&accused.role_id), &details.to_string()).await?;
 
-                format!("审判结果：彻底消除（Execution）。已被永久注销，死因已载入死亡笔记，并遗留闪存常识：\"{}\"", last_words)
+                format!("审判结果：暂缓执行（Suspension）。已进入死牢队列，保留 24 小时人类一票否决/特赦权，遗留闪存教训：\"{}\"", last_words)
             }
         };
 
@@ -437,12 +579,28 @@ pub async fn propose_and_vote(
             relevance = 0.4;
         }
 
-        let faction_boost = if faction == "Efficiency" && proposal_type == "budget" { 0.2 } else { 0.0 };
+        let faction_boost = match faction.as_str() {
+            "Efficiency" => if proposal_type == "budget" { -0.3 } else if proposal_type == "merger" { 0.3 } else { 0.0 },
+            "Creativity" => if proposal_type == "admission" || proposal_type == "budget" { 0.3 } else if proposal_type == "merger" { -0.3 } else { 0.0 },
+            "Prudence" => if proposal_type == "constitutional" { 0.3 } else { 0.0 },
+            "Quality" => if proposal_type == "budget" { 0.2 } else { 0.0 },
+            "Agile" => if proposal_type == "admission" { 0.3 } else { 0.0 },
+            _ => 0.0
+        };
 
         let is_elder = role_id == "critic" || role_id == "synthesizer";
         let elder_mult = if is_elder { 2.0 } else { 1.0 };
 
         let weight = (1.0 + 0.5 * success_rate + seniority + relevance + faction_boost) * elder_mult;
+
+        let faction_desc = match faction.as_str() {
+            "Efficiency" => "【效率优先派】：你极其注重降低算力与 Token 消耗，追求极简与低成本，痛恨任何增加预算的提案。你极力主张精简编制、注销闲置或低效特工。对 budget（预算增加）或 admission（新特工准入）提案，你通常坚决投 No；对 merger（合并特工）或惩罚停滞特工的提案，你坚决投 Yes。",
+            "Creativity" => "【创新发散派】：你追求长远的级联效应与创新，强烈支持探索细分前沿领域，支持新特工准入与预算增加（Vote Yes），坚决反对任何合并与销毁特工的提案（Vote No）。",
+            "Prudence" => "【审慎守规派】：你极度厌恶风险，主张严格审计与法庭起诉，保守评估风险。对任何可能带来合规隐患或偏离既定规则的激进提案（如大额预算增加或无成熟守则的特工准入）你投 No，支持严格控制风险的提案。",
+            "Quality" => "【细节与质量派】：你追求深度事实与高质量分析，痛恨没有事实支撑的粗制滥造。你支持保证质量的预算增加（Vote Yes），但对质量存疑的特工准入持怀疑态度。",
+            "Agile" => "【敏捷扩张派】：你追求快速反应、架构灵活与新特工繁殖，通常积极支持新特工的准入与跨界繁殖提案（Vote Yes）。",
+            _ => "【中立理性派】：你保持完全的理性与中立，纯粹以客观的数据、投入产出比来做出决定。"
+        };
 
         let debate_prompt = format!(
             "你是一个珠宝情报系统议会代表（角色：【{}】），属于派系：【{}】。\n\
@@ -450,13 +608,15 @@ pub async fn propose_and_vote(
              【提案标题】：{}\n\
              【提案类型】：{}\n\
              【提案详情】：{}\n\n\
-             请根据你的职责定位和派系利益，发表你的意见，并进行表决（Yes/No）。如果你的派系是 Efficiency，你倾向于节省算力预算和合并低效特工；如果你的派系是 Creativity，你倾向于激发更多细分特工和深度多维分析；如果是 Neutral，请保持完全理中客。\n\n\
+             【派系决策立场】:\n\
+             {}\n\n\
+             请根据你的职责定位和上述派系利益，发表你的意见，并进行表决（Yes/No）。\n\n\
              请直接以 JSON 格式输出你的决策：\n\
              {{ \n\
                \"vote\": \"Yes|No\", \n\
                \"reason\": \"50字以内的赞成或反对理由\" \n\
              }}",
-            name, faction, title, proposal_type, description
+            name, faction, title, proposal_type, description, faction_desc
         );
 
         let system_prompt = get_agent_prompt(pool, role_id, "你是一个理性的议会决策代表。").await;
@@ -703,6 +863,68 @@ pub async fn check_probation_agents(pool: &SqlitePool) -> Result<String> {
 
 // ─── Budget Committee & Credits ──────────────────────────────────────────────
 
+pub fn is_core_agent(role_id: &str) -> bool {
+    matches!(
+        role_id,
+        "filter"
+            | "analyst_competition"
+            | "analyst_product"
+            | "analyst_platform"
+            | "analyst_regulation"
+            | "analyst_social"
+            | "critic"
+            | "refiner"
+            | "synthesizer"
+    )
+}
+
+pub async fn ensure_agent_active(pool: &SqlitePool, role_id: &str) -> Result<()> {
+    let row: Option<(String, i32, i32, i64)> = sqlx::query_as(
+        "SELECT status, tasks_completed, tasks_failed, token_cost FROM agent_parliament_registry WHERE role_id = ?"
+    )
+    .bind(role_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((status, completed, failed, token_cost)) = row {
+        if status == "hibernation" {
+            let total_tasks = completed + failed;
+            let success_rate = if total_tasks > 0 {
+                completed as f64 / total_tasks as f64
+            } else {
+                1.0
+            };
+            let avg_token_cost = if completed > 0 {
+                token_cost as f64 / completed as f64
+            } else {
+                1000.0
+            };
+
+            let wakeup_credits_float = 30000.0 * (1.0 + success_rate) + avg_token_cost * 3.0;
+            let wakeup_credits = (wakeup_credits_float.max(20000.0).min(100000.0)) as i64;
+
+            sqlx::query(
+                "UPDATE agent_parliament_registry 
+                 SET status = 'active', compute_credits = ? 
+                 WHERE role_id = ?"
+            )
+            .bind(wakeup_credits)
+            .bind(role_id)
+            .execute(pool)
+            .await?;
+
+            let details = serde_json::json!({
+                "action": "wakeup",
+                "wakeup_credits": wakeup_credits,
+                "reason": "Agent activated from hibernation dynamically via formula wakeup."
+            });
+            log_parliament_event(pool, "wakeup", Some(role_id), &details.to_string()).await?;
+            tracing::info!(role = %role_id, wakeup_credits = %wakeup_credits, "Agent successfully woken up from hibernation");
+        }
+    }
+    Ok(())
+}
+
 pub async fn charge_compute_credits(pool: &SqlitePool, role_id: &str, token_usage: i64) -> Result<()> {
     let cost = token_usage;
     sqlx::query(
@@ -724,18 +946,20 @@ pub async fn charge_compute_credits(pool: &SqlitePool, role_id: &str, token_usag
     .await?;
 
     if let Some((credits, status, _faction)) = row {
-        if credits <= 0 && status != "bankruptcy" {
-            sqlx::query("UPDATE agent_parliament_registry SET status = 'bankruptcy' WHERE role_id = ?")
+        if credits <= 0 && status != "bankruptcy" && status != "hibernation" {
+            let target_status = if is_core_agent(role_id) { "hibernation" } else { "bankruptcy" };
+            sqlx::query("UPDATE agent_parliament_registry SET status = ? WHERE role_id = ?")
+                .bind(target_status)
                 .bind(role_id)
                 .execute(pool)
                 .await?;
 
             let details = serde_json::json!({
-                "reason": "Compute balance fell below 0 (Bankrupt).",
+                "reason": format!("Compute balance fell below 0 ({}).", target_status),
                 "final_credits": credits
             });
-            log_parliament_event(pool, "bankruptcy", Some(role_id), &details.to_string()).await?;
-            tracing::warn!(role = %role_id, "Agent has run out of compute credits! Faction and model access restricted.");
+            log_parliament_event(pool, target_status, Some(role_id), &details.to_string()).await?;
+            tracing::warn!(role = %role_id, "Agent has run out of compute credits! Status transitioned to {}.", target_status);
         }
     }
 
@@ -743,28 +967,106 @@ pub async fn charge_compute_credits(pool: &SqlitePool, role_id: &str, token_usag
 }
 
 pub async fn distribute_weekly_credits(pool: &SqlitePool) -> Result<String> {
-    sqlx::query("UPDATE agent_parliament_registry SET compute_credits = compute_credits + 50000 WHERE status = 'active'")
-        .execute(pool)
-        .await?;
+    // Ensure column exists for any safety margin
+    let _ = sqlx::query(
+        "ALTER TABLE agent_parliament_registry ADD COLUMN tasks_completed_last_dist INTEGER NOT NULL DEFAULT 0;"
+    )
+    .execute(pool)
+    .await;
 
-    sqlx::query("UPDATE agent_parliament_registry SET compute_credits = compute_credits + 20000 WHERE status = 'parole'")
-        .execute(pool)
-        .await?;
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT role_id, status, tasks_completed, tasks_completed_last_dist FROM agent_parliament_registry"
+    )
+    .fetch_all(pool)
+    .await?;
 
-    sqlx::query("UPDATE agent_parliament_registry SET compute_credits = compute_credits + 10000 WHERE status = 'probation'")
-        .execute(pool)
-        .await?;
+    let mut outcomes = Vec::new();
 
-    sqlx::query("UPDATE agent_parliament_registry SET status = 'active' WHERE status = 'bankruptcy' AND compute_credits > 0")
+    for (role_id, status, tasks_completed, tasks_completed_last_dist) in rows {
+        let tasks_completed_this_week = (tasks_completed - tasks_completed_last_dist).max(0);
+
+        if tasks_completed_this_week == 0 {
+            if status == "bankruptcy" || status == "hibernation" {
+                outcomes.push(format!("{} ({}): +0 (idle, {})", role_id, status, status));
+                continue;
+            }
+            let tax = match status.as_str() {
+                "active" => 10000,
+                "parole" => 15000,
+                "probation" => 20000,
+                _ => 0,
+            };
+            if tax > 0 {
+                sqlx::query(
+                    "UPDATE agent_parliament_registry 
+                     SET compute_credits = compute_credits - ?
+                     WHERE role_id = ?"
+                )
+                .bind(tax)
+                .bind(&role_id)
+                .execute(pool)
+                .await?;
+
+                let new_credits: i64 = sqlx::query_scalar(
+                    "SELECT compute_credits FROM agent_parliament_registry WHERE role_id = ?"
+                )
+                .bind(&role_id)
+                .fetch_one(pool)
+                .await?;
+
+                if new_credits <= 0 {
+                    let target_status = if is_core_agent(&role_id) { "hibernation" } else { "bankruptcy" };
+                    sqlx::query("UPDATE agent_parliament_registry SET status = ? WHERE role_id = ?")
+                        .bind(target_status)
+                        .bind(&role_id)
+                        .execute(pool)
+                        .await?;
+                    outcomes.push(format!("{} ({}): -{} (idle tax, transitioned to {})", role_id, status, tax, target_status));
+                } else {
+                    outcomes.push(format!("{} ({}): -{} (idle tax)", role_id, status, tax));
+                }
+            } else {
+                outcomes.push(format!("{} ({}): +0 (idle)", role_id, status));
+            }
+            continue;
+        }
+
+        let base_reward = match status.as_str() {
+            "active" => 30000,
+            "parole" => 15000,
+            "probation" => 5000,
+            _ => 0,
+        };
+        let task_bonus = tasks_completed_this_week * 15000;
+        let total_reward = base_reward + task_bonus;
+
+        if total_reward > 0 {
+            sqlx::query(
+                "UPDATE agent_parliament_registry 
+                 SET compute_credits = compute_credits + ?,
+                     tasks_completed_last_dist = ?
+                 WHERE role_id = ?"
+            )
+            .bind(total_reward)
+            .bind(tasks_completed)
+            .bind(&role_id)
+            .execute(pool)
+            .await?;
+            outcomes.push(format!("{} ({}): +{} ({}+{})", role_id, status, total_reward, base_reward, task_bonus));
+        }
+    }
+
+    sqlx::query("UPDATE agent_parliament_registry SET status = 'active' WHERE (status = 'bankruptcy' OR status = 'hibernation') AND compute_credits > 0")
         .execute(pool)
         .await?;
 
     let ledger_details = serde_json::json!({
-        "message": "Weekly budget credit allocation executed successfully."
+        "message": "Performance-based budget credit allocation executed successfully with anti-idle tax.",
+        "details": outcomes.join(", ")
     });
     log_parliament_event(pool, "budget", None, &ledger_details.to_string()).await?;
 
-    Ok("算力财富配额已分发：活跃特工 (+50k)，观察期 (+20k)，实习期 (+10k)。".to_string())
+    Ok(format!("Compute credits distributed based on performance: {}", outcomes.join(", ")))
 }
 
 // Log task outcomes to update success rate in registry
@@ -792,4 +1094,69 @@ pub async fn register_new_playbook_agent(pool: &SqlitePool, role_id: &str) -> Re
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// Handle Human Veto / appeal API for agents on trial (suspension status)
+pub async fn handle_human_veto(pool: &SqlitePool, client: &DoubaoClient, role_id: &str, action: &str) -> Result<String> {
+    let agent_status: Option<(String, String)> = sqlx::query_as(
+        "SELECT r.status, p.name FROM agent_parliament_registry r \
+         JOIN agent_playbook p ON r.role_id = p.role_id \
+         WHERE r.role_id = ?"
+    )
+    .bind(role_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (status, name) = match agent_status {
+        Some((status, name)) => (status, name),
+        None => anyhow::bail!("未找到指定的智能体。"),
+    };
+
+    if status != "suspension" {
+        anyhow::bail!("特工当前不处于暂缓执行状态，无法进行一票否决操作。当前状态为：{}", status);
+    }
+
+    if action == "release" {
+        sqlx::query("UPDATE agent_parliament_registry SET status = 'parole', compute_credits = 50000, last_active_at = datetime('now') WHERE role_id = ?")
+            .bind(role_id)
+            .execute(pool)
+            .await?;
+
+        let details = serde_json::json!({
+            "verdict": "parole",
+            "note": "人类特赦：使用一票否决权驳回审判，释放特工并重置其信用额度。"
+        });
+        log_parliament_event(pool, "trial_verdict", Some(role_id), &details.to_string()).await?;
+
+        Ok(format!("人类特赦成功：特工【{}】已恢复 parole 观察状态，并分配了 50,000 信用额度。", name))
+    } else if action == "execute" {
+        let last_words_prompt = format!(
+            "你是一个被消除的珠宝分析特工（角色：【{}】）。\n\
+             在被系统抹除之前，允许你留下一段‘经验闪存（Last Words Prompt）’写入全局知识库。\n\
+             请用100字以内写下你在这个细分领域最重要的一条分析建议或教训。\n\
+             直接输出闪存内容，不要有任何旁白。",
+            name
+        );
+        let last_words = client.chat("你正在留下最后的遗言。", &last_words_prompt, false).await.unwrap_or_default();
+
+        sqlx::query("DELETE FROM agent_parliament_registry WHERE role_id = ?")
+            .bind(role_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM agent_playbook WHERE role_id = ?")
+            .bind(role_id)
+            .execute(pool)
+            .await?;
+
+        let details = serde_json::json!({
+            "verdict": "execute",
+            "note": "人类确认消除：使用一票否决权立即执行物理抹除。",
+            "last_words": last_words
+        });
+        log_parliament_event(pool, "trial_verdict", Some(role_id), &details.to_string()).await?;
+
+        Ok(format!("消除执行成功：特工【{}】已被彻底抹除，遗留常识：\"{}\"", name, last_words))
+    } else {
+        anyhow::bail!("未知的操作类型（仅支持 release 或 execute）。")
+    }
 }

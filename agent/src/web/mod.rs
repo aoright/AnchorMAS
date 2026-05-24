@@ -177,6 +177,34 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/parliament/trial", axum::routing::post(handlers::trigger_parliament_trial))
         .route("/api/parliament/distribute", axum::routing::post(handlers::distribute_compute_credits))
         .route("/api/parliament/crossover", axum::routing::post(handlers::trigger_crossover))
+        .route("/api/parliament/veto", axum::routing::post(handlers::veto_agent))
+        .route("/api/parliament/probation", axum::routing::post(handlers::check_probation))
+        .route("/api/parliament/proposals/:id/votes", axum::routing::get(handlers::get_proposal_votes))
+
+        // ── Agent Playbook Rules API ────────────────────────────────────
+        .route("/api/agent/rules", axum::routing::get(handlers::get_rules).post(handlers::create_rule))
+        .route("/api/agent/rules/:id", axum::routing::put(handlers::update_rule).delete(handlers::delete_rule))
+        .route("/api/agent/rules/compile/:role_id", axum::routing::get(handlers::compile_rules))
+
+        // ── Regression Test Suite API ───────────────────────────────────
+        .route("/api/regression-tests", axum::routing::get(handlers::get_regression_tests).post(handlers::create_regression_test))
+        .route("/api/regression-tests/:id", axum::routing::delete(handlers::delete_regression_test))
+        .route("/api/regression-tests/auto-update", axum::routing::post(handlers::trigger_regression_tests_auto_update))
+
+        // ── Agent Sandbox Verification & Playbook updates ───────────────
+        .route("/api/agent/verify-sandbox", axum::routing::post(handlers::verify_sandbox))
+        .route("/api/agent/roles/:id", axum::routing::get(handlers::get_agent_role_detail).put(handlers::update_agent_role))
+
+        // ── Data Sources Configuration API ──────────────────────────────
+        .route("/api/data-sources", axum::routing::get(handlers::list_data_sources).post(handlers::create_data_source))
+        .route("/api/data-sources/:id", axum::routing::put(handlers::update_data_source).delete(handlers::delete_data_source))
+
+        // ── Agent Feedback API ──────────────────────────────────────────
+        .route("/api/agent/feedback", axum::routing::get(handlers::list_feedback).post(handlers::create_feedback))
+
+        // ── Evidence Chain Tracing Triggers ─────────────────────────────
+        .route("/api/bookmarks/:id/trace", axum::routing::post(handlers::trigger_bookmark_trace))
+        .route("/api/bookmarks/track", axum::routing::post(handlers::trigger_bookmark_track))
         // ── App Frontend API (new) ──────────────────────────────────────
         // News
         .route("/app/news", axum::routing::get(app_handlers::list_news))

@@ -32,6 +32,7 @@ pub async fn analyze_events(
             "Regulation" => "analyst_regulation",
             _ => "analyst_social",
         };
+        let _ = super::parliament::ensure_agent_active(pool, role_id).await;
         let default_prompt = get_analyst_prompt(category);
         let system_prompt = super::get_agent_prompt(pool, role_id, &default_prompt).await;
 
@@ -488,6 +489,7 @@ pub async fn analyze_single_event(
     event: &FilteredEvent,
 ) -> Result<AnalyzedEvent> {
     let (role_id, _name) = ensure_analyst_exists(client, pool, &event.category).await?;
+    let _ = super::parliament::ensure_agent_active(pool, &role_id).await;
     let default_prompt = get_analyst_prompt(&event.category);
     let system_prompt = super::get_agent_prompt(pool, &role_id, &default_prompt).await;
 
@@ -524,6 +526,7 @@ pub async fn peer_review_event(
     event: &AnalyzedEvent,
     peer_role_id: &str,
 ) -> Result<String> {
+    let _ = super::parliament::ensure_agent_active(pool, peer_role_id).await;
     let peer_role_name = match peer_role_id {
         "analyst_competition" => "竞争动态分析特工".to_string(),
         "analyst_product" => "产品趋势分析特工".to_string(),

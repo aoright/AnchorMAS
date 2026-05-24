@@ -210,16 +210,31 @@ pub async fn synthesize_briefing(
         events_section
     );
 
-    let response = client.chat(&system_prompt, &user_prompt, true).await?;
+    let response_res = client.chat(&system_prompt, &user_prompt, true).await;
+    let response = match response_res {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = super::parliament::log_task_outcome(pool, "synthesizer", false).await;
+            return Err(e);
+        }
+    };
 
     // Charge credits:
     let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
     let _ = super::parliament::charge_compute_credits(pool, "synthesizer", tokens as i64).await;
 
-    let briefing = parse_briefing_response(&response, events)?;
-
-    tracing::info!(id = %briefing.id, "Strategic briefing synthesized");
-    Ok(briefing)
+    let briefing = parse_briefing_response(&response, events);
+    match briefing {
+        Ok(b) => {
+            let _ = super::parliament::log_task_outcome(pool, "synthesizer", true).await;
+            tracing::info!(id = %b.id, "Strategic briefing synthesized");
+            Ok(b)
+        }
+        Err(e) => {
+            let _ = super::parliament::log_task_outcome(pool, "synthesizer", false).await;
+            Err(e)
+        }
+    }
 }
 
 fn parse_briefing_response(
@@ -337,7 +352,14 @@ pub async fn audit_briefing(
         serde_json::to_string_pretty(&briefing_json)?
     );
 
-    let response = client.chat(&system_prompt, &user_prompt, true).await?;
+    let response_res = client.chat(&system_prompt, &user_prompt, true).await;
+    let response = match response_res {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = super::parliament::log_task_outcome(pool, "auditor", false).await;
+            return Err(e);
+        }
+    };
 
     // Charge credits:
     let tokens = (system_prompt.len() + user_prompt.len() + response.len()) / 3;
@@ -351,19 +373,25 @@ pub async fn audit_briefing(
         critique_notes: String,
     }
 
-    if let Ok(res) = serde_json::from_str::<AuditResult>(&raw_json) {
-        if !res.approved {
-            tracing::warn!("Briefing failed quality audit: {}", res.critique_notes);
-            crate::agent::blackboard::log_feedback(
-                pool,
-                "auditor",
-                "synthesizer",
-                Some(&briefing.id),
-                &res.critique_notes,
-            )
-            .await;
+    match serde_json::from_str::<AuditResult>(&raw_json) {
+        Ok(res) => {
+            let _ = super::parliament::log_task_outcome(pool, "auditor", true).await;
+            if !res.approved {
+                tracing::warn!("Briefing failed quality audit: {}", res.critique_notes);
+                crate::agent::blackboard::log_feedback(
+                    pool,
+                    "auditor",
+                    "synthesizer",
+                    Some(&briefing.id),
+                    &res.critique_notes,
+                )
+                .await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = super::parliament::log_task_outcome(pool, "auditor", false).await;
+            Err(e.into())
         }
     }
-
-    Ok(())
 }

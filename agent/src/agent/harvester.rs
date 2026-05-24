@@ -13,6 +13,8 @@ const MIN_FULL_TEXT_CHARS: usize = 120;
 const MAX_ARTICLE_CHARS: usize = 8_000;
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const GOOGLEBOT_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 
 #[derive(Debug, Clone, Default)]
 pub struct HarvestProgress {
@@ -317,14 +319,17 @@ where
     let mut docs = docs;
     
     // Extract Google News URLs to decode in batch
-    let gnews_urls: Vec<String> = docs
+    let mut gnews_urls: Vec<String> = docs
         .iter()
         .filter(|doc| doc.source_url.contains("news.google.com/rss/articles/") || doc.source_url.contains("news.google.com/articles/"))
         .map(|doc| doc.source_url.clone())
         .collect();
 
+    gnews_urls.sort();
+    gnews_urls.dedup();
+
     if !gnews_urls.is_empty() {
-        tracing::info!("Batch decoding {} Google News URLs...", gnews_urls.len());
+        tracing::info!("Batch decoding {} unique Google News URLs...", gnews_urls.len());
         let decoded_map = decode_google_news_urls_batch(&gnews_urls).await;
         tracing::info!("Decoded {} / {} Google News URLs", decoded_map.len(), gnews_urls.len());
         for doc in &mut docs {
@@ -473,14 +478,14 @@ async fn decode_google_news_urls_batch(urls: &[String]) -> std::collections::Has
         command.arg(url);
     }
 
-    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await {
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             tracing::error!(error = %e, "Failed to execute python3 decode_url.py batch");
             return map;
         }
         Err(_) => {
-            tracing::error!("decode_url.py batch process timed out after 30 seconds");
+            tracing::error!("decode_url.py batch process timed out after 60 seconds");
             return map;
         }
     };
@@ -505,21 +510,61 @@ async fn decode_google_news_urls_batch(urls: &[String]) -> std::collections::Has
 }
 
 async fn fetch_article_text(client: &Client, url: &str) -> Result<String> {
-    let html = client
-        .get(url)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "text/html,application/xhtml+xml")
-        .timeout(std::time::Duration::from_secs(12))
-        .send()
-        .await
-        .context("Article HTTP request failed")?
-        .error_for_status()
-        .context("Article HTTP status was not successful")?
-        .text()
-        .await
-        .context("Failed to read article response body")?;
+    let static_res = async {
+        let html = client
+            .get(url)
+            .header("User-Agent", GOOGLEBOT_USER_AGENT)
+            .header("Referer", "https://www.google.com/")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .timeout(std::time::Duration::from_secs(12))
+            .send()
+            .await
+            .context("Article HTTP request failed")?
+            .error_for_status()
+            .context("Article HTTP status was not successful")?
+            .text()
+            .await
+            .context("Failed to read article response body")?;
 
-    extract_article_text(&html).context("No usable article text found")
+        extract_article_text(&html).context("No usable article text found")
+    }.await;
+
+    match static_res {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            tracing::info!(url = %url, error = %e, "Static crawl failed or yielded short text. Attempting Playwright/Wayback fallback...");
+            
+            let script_path = std::env::var("AIRS_FETCH_STEALTH_SCRIPT")
+                .unwrap_or_else(|_| "scripts/fetch_stealth.py".to_string());
+                
+            let mut command = tokio::process::Command::new("python3");
+            command.arg(script_path).arg(url);
+            
+            match tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await {
+                Ok(Ok(output)) => {
+                    if output.status.success() {
+                        let html = String::from_utf8_lossy(&output.stdout);
+                        if let Some(text) = extract_article_text(&html) {
+                            tracing::info!(url = %url, "Successfully fetched full text using Playwright/Wayback fallback");
+                            return Ok(text);
+                        }
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!(url = %url, status = ?output.status, stderr = %stderr, "Playwright/Wayback fallback script exited with error status");
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(url = %url, error = %e, "Failed to execute Playwright/Wayback fallback script");
+                }
+                Err(_) => {
+                    tracing::error!(url = %url, "Playwright/Wayback fallback script timed out after 45 seconds");
+                }
+            }
+            
+            Err(anyhow::anyhow!("All crawlers (Reqwest and Playwright/Wayback fallback) failed for URL: {}", url))
+        }
+    }
 }
 
 fn extract_article_text(html: &str) -> Option<String> {
@@ -571,7 +616,12 @@ fn extract_article_text(html: &str) -> Option<String> {
     }
 
     if text_len(&best) >= MIN_FULL_TEXT_CHARS {
-        Some(best)
+        let cleaned = clean_scraped_text(&best);
+        if text_len(&cleaned) >= MIN_FULL_TEXT_CHARS {
+            Some(cleaned)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -580,22 +630,140 @@ fn extract_article_text(html: &str) -> Option<String> {
 fn extract_element_text(element: ElementRef<'_>) -> String {
     let mut text = String::new();
     traverse_clean_text(*element, &mut text);
-    normalize_text(&text)
+    normalize_spaces_keep_newlines(&text)
+}
+
+fn is_noise_element(name: &str, id: Option<&str>, class: Option<&str>) -> bool {
+    if name == "script" || name == "style" || name == "noscript" || name == "iframe" 
+       || name == "header" || name == "footer" || name == "nav" || name == "aside" {
+        return true;
+    }
+    
+    let check = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains("advertisement") 
+            || s.contains("advert")
+            || s.contains("menu") 
+            || s.contains("footer") 
+            || s.contains("header") 
+            || s.contains("navigation")
+            || s.contains("sidebar") 
+            || s.contains("social") 
+            || s.contains("share") 
+            || s.contains("popup")
+            || s.contains("cookie")
+            || s.contains("privacy")
+            || s.contains("policy")
+            || s.contains("terms")
+            || s.contains("copyright")
+            || s.contains("subscribe")
+            || s.contains("newsletter")
+            || s.contains("related")
+            || s.contains("recommended")
+            || s.contains("trending")
+            || s.contains("popular")
+            || s.contains("widget")
+            || s.contains("banner")
+            || s.contains("breadcrumb")
+            || s.contains("categories")
+            || s.contains("category")
+            || s.contains("author")
+            || s.contains("byline")
+            || s.contains("comment")
+            || s == "ad"
+            || s == "ads"
+            || s == "nav"
+            || s.starts_with("ad-")
+            || s.starts_with("ads-")
+            || s.starts_with("nav-")
+            || s.ends_with("-ad")
+            || s.ends_with("-ads")
+            || s.ends_with("-nav")
+            || s.contains("-ad-")
+            || s.contains("-ads-")
+            || s.contains("-nav-")
+            || s.contains("_ad_")
+            || s.contains("_ads_")
+            || s.contains("_nav_")
+    };
+    
+    id.map_or(false, |id_val| check(id_val)) || class.map_or(false, |c_val| check(c_val))
+}
+
+fn has_noise_ancestor(node: ego_tree::NodeRef<'_, scraper::Node>) -> bool {
+    let mut curr = Some(node);
+    while let Some(n) = curr {
+        if let scraper::Node::Element(elem) = n.value() {
+            let name = elem.name();
+            let id = elem.id();
+            let class = elem.attr("class");
+            if is_noise_element(name, id, class) {
+                return true;
+            }
+        }
+        curr = n.parent();
+    }
+    false
+}
+
+fn ensure_double_newline(text: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+    if text.ends_with("\n\n") {
+        return;
+    }
+    if text.ends_with('\n') {
+        text.push('\n');
+    } else {
+        text.push_str("\n\n");
+    }
+}
+
+fn ensure_single_newline(text: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
 }
 
 fn traverse_clean_text(node: ego_tree::NodeRef<'_, scraper::Node>, text: &mut String) {
     match node.value() {
         scraper::Node::Text(t) => {
-            text.push_str(&t);
-            text.push(' ');
+            let s = t.to_string();
+            text.push_str(&s);
+            if !s.ends_with(char::is_whitespace) {
+                text.push(' ');
+            }
         }
         scraper::Node::Element(elem) => {
             let name = elem.name();
-            if name == "script" || name == "style" || name == "noscript" || name == "iframe" {
+            let id = elem.id();
+            let class = elem.attr("class");
+            if is_noise_element(name, id, class) {
                 return;
             }
+            
+            let is_block = matches!(
+                name,
+                "p" | "div" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "article" | "section" | "blockquote" | "pre" | "ul" | "ol"
+            );
+            let is_br = name == "br";
+            
+            if is_block {
+                ensure_double_newline(text);
+            } else if is_br {
+                ensure_single_newline(text);
+            }
+            
             for child in node.children() {
                 traverse_clean_text(child, text);
+            }
+            
+            if is_block {
+                ensure_double_newline(text);
             }
         }
         _ => {
@@ -606,6 +774,7 @@ fn traverse_clean_text(node: ego_tree::NodeRef<'_, scraper::Node>, text: &mut St
     }
 }
 
+
 fn extract_paragraph_text(document: &Html) -> String {
     let selector = match Selector::parse("p") {
         Ok(selector) => selector,
@@ -614,11 +783,182 @@ fn extract_paragraph_text(document: &Html) -> String {
 
     let paragraphs: Vec<String> = document
         .select(&selector)
+        .filter(|el| !has_noise_ancestor(**el))
         .map(extract_element_text)
         .filter(|text| text_len(text) >= 40)
         .collect();
 
-    normalize_text(&paragraphs.join("\n\n"))
+    normalize_spaces_keep_newlines(&paragraphs.join("\n\n"))
+}
+
+fn is_noise_paragraph(p: &str) -> bool {
+    let p_lower = p.to_lowercase();
+    let p_trimmed = p_lower.trim();
+
+    if p_trimmed.is_empty() {
+        return true;
+    }
+
+    // 1. Exact matches for ads / cookie settings / nav options / copy / terms
+    if p_trimmed == "advertisement" 
+       || p_trimmed == "advertisements"
+       || p_trimmed == "ad" 
+       || p_trimmed == "sponsored"
+       || p_trimmed == "cookie settings"
+       || p_trimmed == "privacy policy"
+       || p_trimmed == "terms of use"
+       || p_trimmed == "terms of service"
+       || p_trimmed == "terms & conditions"
+       || p_trimmed == "all rights reserved"
+       || p_trimmed == "read more"
+       || p_trimmed == "share this article"
+    {
+        return true;
+    }
+
+    // 2. Count pipe or bullet characters - indicating a menu or list
+    let separators = p_trimmed.chars().filter(|&c| c == '|' || c == '•' || c == '·' || c == '丨' || c == '│').count();
+    if separators >= 3 {
+        return true;
+    }
+
+    // 3. Starts with copyright or advertisement labels
+    if p_trimmed.starts_with("copyright ©") 
+       || p_trimmed.starts_with("copyright (c)")
+       || p_trimmed.starts_with("advertisement:")
+       || p_trimmed.starts_with("sponsored content")
+       || p_trimmed.starts_with("advertisement ")
+       || p_trimmed.ends_with(" advertisement")
+       || p_trimmed.starts_with("sponsored by")
+    {
+        return true;
+    }
+
+    // 4. Newsletter and social follow prompts
+    if p_trimmed.contains("subscribe to our newsletter")
+       || p_trimmed.contains("sign up for our newsletter")
+       || p_trimmed.contains("follow us on social media")
+       || p_trimmed.contains("follow us on twitter")
+       || p_trimmed.contains("follow us on facebook")
+       || p_trimmed.contains("subscribe to")
+       || p_trimmed.contains("follow us")
+       || (p_trimmed.contains("newsletter") && p_trimmed.contains("sign up"))
+    {
+        return true;
+    }
+
+    // 5. Chinese regulatory / copyright / complaint / contact boilerplate
+    if p_trimmed.contains("icp备") 
+       || p_trimmed.contains("公网安备") 
+       || p_trimmed.contains("未经书面授权")
+       || p_trimmed.contains("未经授权禁止转载")
+       || p_trimmed.contains("违法和不良信息举报")
+       || (p_trimmed.contains("举报电话") && p_trimmed.contains("举报邮箱"))
+       || (p_trimmed.contains("服务邮箱") && p_trimmed.contains("@"))
+       || p_trimmed.contains("版权所有") 
+       || p_trimmed.contains("免责声明")
+       || p_trimmed.contains("隐私政策")
+       || p_trimmed.contains("服务条款")
+       || p_trimmed.contains("关于我们")
+       || p_trimmed.contains("联系我们")
+       || p_trimmed.contains("广告服务")
+       || p_trimmed.contains("转载请注明出处")
+       || p_trimmed.contains("扫码关注")
+       || p_trimmed.contains("分享到：")
+       || p_trimmed.contains("分享到微信")
+    {
+        return true;
+    }
+
+    // 6. Multiple footer links
+    let footer_keywords = [
+        "关于我们", "联系我们", "广告服务", "合作加盟", "网站声明", "版权声明", "信息保护", 
+        "报社招聘", "招聘英才", "友情链接", "版权所有", "网站律师", "数据服务", "服务邮箱", 
+        "违法和不良", "关于人民网", "人民日报社概况", "免责声明", "隐私政策", "服务条款", "隐私条款"
+    ];
+    let matched_keywords_count = footer_keywords.iter().filter(|&&kw| p_trimmed.contains(kw)).count();
+    if matched_keywords_count >= 2 {
+        return true;
+    }
+
+    // 7. General short advertisement paragraphs containing ad keyword
+    if p_trimmed.contains("advertisement") && p_trimmed.len() < 250 {
+        return true;
+    }
+
+    false
+}
+
+fn strip_advertisement_keywords(text: &str) -> String {
+    let mut s = text.replace("Advertisement", "")
+                    .replace("ADVERTISEMENT", "")
+                    .replace("advertisement", "");
+    while s.contains("  ") {
+        s = s.replace("  ", " ");
+    }
+    s
+}
+
+fn normalize_spaces_keep_newlines(text: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_empty = false;
+    
+    for line in text.lines() {
+        let trimmed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if trimmed.is_empty() {
+            if !last_was_empty && !result.is_empty() {
+                result.push('\n');
+                last_was_empty = true;
+            }
+        } else {
+            if last_was_empty {
+                last_was_empty = false;
+            }
+            result.push_str(&trimmed);
+            result.push('\n');
+        }
+    }
+    result.trim().to_string()
+}
+
+fn clean_scraped_text(text: &str) -> String {
+    let mut cleaned_paragraphs = Vec::new();
+    
+    // Split into paragraphs by double newlines
+    for paragraph in text.split("\n\n") {
+        let mut clean_lines = Vec::new();
+        // Split each paragraph into lines
+        for line in paragraph.split('\n') {
+            let line_trimmed = line.trim();
+            let line_lower = line_trimmed.to_lowercase();
+            if line_lower.is_empty() 
+               || line_lower == "advertisement" 
+               || line_lower == "advertisements"
+               || line_lower.starts_with("copyright ©")
+               || line_lower.starts_with("copyright (c)")
+               || line_lower.contains("privacy policy")
+               || line_lower.contains("terms of use")
+               || line_lower.contains("icp备")
+               || line_lower.contains("公网安备")
+               || line_lower.contains("未经书面授权")
+               || line_lower.contains("未经授权禁止")
+            {
+                continue;
+            }
+            clean_lines.push(line);
+        }
+        
+        let cleaned_paragraph = clean_lines.join("\n").trim().to_string();
+        if !cleaned_paragraph.is_empty() && !is_noise_paragraph(&cleaned_paragraph) {
+            let stripped = strip_advertisement_keywords(&cleaned_paragraph);
+            let final_p = stripped.trim().to_string();
+            if !final_p.is_empty() {
+                cleaned_paragraphs.push(final_p);
+            }
+        }
+    }
+    
+    cleaned_paragraphs.join("\n\n")
 }
 
 async fn fetch_reddit(client: &Client, url: &str, hours: Option<u32>) -> Result<Vec<RawDocument>> {
@@ -706,10 +1046,6 @@ fn strip_html(html: &str) -> String {
         .join(" ")
         .trim()
         .to_string()
-}
-
-fn normalize_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

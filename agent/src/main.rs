@@ -1,8 +1,4 @@
-mod agent;
-mod config;
-mod db;
-mod vectordb;
-mod web;
+use airs_agent::{config, db, vectordb, web};
 
 use std::sync::Arc;
 

@@ -16,7 +16,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::broadcast;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -551,7 +550,7 @@ where
             (cached_docs, 0, message)
         } else {
             let updated_existing_count =
-                update_existing_raw_articles_if_content_longer(pool, &raw_docs).await?;
+                update_existing_raw_articles_if_content_longer(pool, &raw_docs, &doubao).await?;
 
             // Identify new documents in a single batch check
             let urls_to_check: Vec<String> = raw_docs.iter().map(|d| d.source_url.clone()).collect();
@@ -635,11 +634,28 @@ where
 
         let enriched_short_docs = harvester::enrich_article_contents(&http_client, short_docs, |_p| std::future::ready(())).await;
         
-        for doc in enriched_short_docs {
+        for mut doc in enriched_short_docs {
             if doc.content.chars().count() >= 120 {
                 tracing::info!("Successfully crawled full content for: {}", doc.title);
-                sqlx::query("UPDATE raw_articles SET content = ? WHERE source_url = ? OR resolved_url = ?")
+
+                if !is_text_chinese(&doc.content) {
+                    tracing::info!("Translating enriched raw article to Chinese: {}", doc.title);
+                    match translate_article_to_chinese(&doubao, &doc.title, &doc.content).await {
+                        Ok((trans_title, trans_content)) => {
+                            doc.title = trans_title;
+                            doc.content = trans_content;
+                            doc.raw_language = "zh".to_string();
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to translate enriched raw article to Chinese");
+                        }
+                    }
+                }
+
+                sqlx::query("UPDATE raw_articles SET title = ?, content = ?, raw_language = ? WHERE source_url = ? OR resolved_url = ?")
+                    .bind(&doc.title)
                     .bind(&doc.content)
+                    .bind(&doc.raw_language)
                     .bind(&doc.source_url)
                     .bind(&doc.source_url)
                     .execute(pool)
@@ -664,7 +680,33 @@ where
         }
     }
 
-    new_raw_docs = long_docs;
+    let mut final_long_docs = Vec::new();
+    for mut doc in long_docs {
+        if !is_text_chinese(&doc.content) {
+            tracing::info!("Translating long raw doc to Chinese before MAS: {}", doc.title);
+            match translate_article_to_chinese(&doubao, &doc.title, &doc.content).await {
+                Ok((trans_title, trans_content)) => {
+                    doc.title = trans_title;
+                    doc.content = trans_content;
+                    doc.raw_language = "zh".to_string();
+                    
+                    let _ = sqlx::query("UPDATE raw_articles SET title = ?, content = ?, raw_language = ? WHERE source_url = ? OR resolved_url = ?")
+                        .bind(&doc.title)
+                        .bind(&doc.content)
+                        .bind(&doc.raw_language)
+                        .bind(&doc.source_url)
+                        .bind(&doc.source_url)
+                        .execute(pool)
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to translate long raw doc to Chinese before MAS");
+                }
+            }
+        }
+        final_long_docs.push(doc);
+    }
+    new_raw_docs = final_long_docs;
 
     let mut consensus_events = Vec::new();
 
@@ -672,21 +714,29 @@ where
         // Now, run the Blackboard Multi-Agent System!
         tracing::info!("Initializing Blackboard MAS for {} raw documents", new_raw_docs.len());
         
-        let blackboard = Arc::new(blackboard::Blackboard::new());
+        let (gatekeeper_tx, gatekeeper_rx) = tokio::sync::mpsc::channel(2000);
+        let (dedup_tx, dedup_rx) = tokio::sync::mpsc::channel(2000);
+        let (analyst_tx, analyst_rx) = tokio::sync::mpsc::channel(2000);
+        let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(2000);
+        let (critic_tx, critic_rx) = tokio::sync::mpsc::channel(2000);
+        let (refiner_tx, refiner_rx) = tokio::sync::mpsc::channel(2000);
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(2000);
+
+        let blackboard = Arc::new(blackboard::Blackboard::new(
+            gatekeeper_tx.clone(),
+            dedup_tx,
+            analyst_tx,
+            peer_tx,
+            critic_tx,
+            refiner_tx,
+            progress_tx,
+        ));
         
         // Set initial work count for Raw articles
         blackboard.increment_work(new_raw_docs.len());
 
         // Spawn agent task runners in parallel!
         let config_arc = Arc::new(config.clone());
-        
-        // Subscribe receivers first to avoid tokio::sync::broadcast race conditions
-        let gatekeeper_rx = blackboard.tx.subscribe();
-        let dedup_rx = blackboard.tx.subscribe();
-        let analyst_rx = blackboard.tx.subscribe();
-        let peer_rx = blackboard.tx.subscribe();
-        let critic_rx = blackboard.tx.subscribe();
-        let refiner_rx = blackboard.tx.subscribe();
 
         // 1. Gatekeeper Task
         let gatekeeper_bb = blackboard.clone();
@@ -738,14 +788,11 @@ where
             blackboard::start_refiner(refiner_bb, refiner_rx, refiner_client, refiner_pool).await;
         });
 
-        // Coordinator & Progress Reporter Loop on main thread
-        let mut rx = blackboard.tx.subscribe();
-        
-        // Broadcast all raw articles to kick off the pipeline!
+        // Send all raw articles to kick off the pipeline!
         for doc in &new_raw_docs {
-            let _ = blackboard.tx.send(blackboard::AgentMessage::RawArticleAdded(doc.clone()));
+            let _ = gatekeeper_tx.send(blackboard::AgentMessage::RawArticleAdded(doc.clone())).await;
         }
-        let _ = blackboard.tx.send(blackboard::AgentMessage::AllScoutingDone);
+        let _ = gatekeeper_tx.send(blackboard::AgentMessage::AllScoutingDone).await;
 
         let mut raw_processed = 0;
         let mut events_filtered = 0;
@@ -772,9 +819,9 @@ where
             }
 
             tokio::select! {
-                msg_res = rx.recv() => {
+                msg_res = progress_rx.recv() => {
                     match msg_res {
-                        Ok(blackboard::AgentMessage::RawArticleAdded(_)) => {
+                        Some(blackboard::AgentMessage::RawArticleAdded(_)) => {
                             raw_processed += 1;
                             let msg = format!("MAS Blackboard: Processing raw article {} / {}", raw_processed, new_raw_docs.len());
                             progress(PipelineProgress {
@@ -785,7 +832,7 @@ where
                                 ..PipelineProgress::default()
                             }).await;
                         }
-                        Ok(blackboard::AgentMessage::FilteredEventAdded(event)) => {
+                        Some(blackboard::AgentMessage::FilteredEventAdded(event)) => {
                             events_filtered += 1;
                             let msg = format!("MAS Blackboard: Filtered and classified event: '{}'", event.title);
                             progress(PipelineProgress {
@@ -795,7 +842,7 @@ where
                                 ..PipelineProgress::default()
                             }).await;
                         }
-                        Ok(blackboard::AgentMessage::AnalysisCompleted(event)) => {
+                        Some(blackboard::AgentMessage::AnalysisCompleted(event)) => {
                             events_analyzed += 1;
                             let msg = format!("MAS Blackboard: Domain analysis completed for: '{}'", event.title);
                             progress(PipelineProgress {
@@ -805,7 +852,7 @@ where
                                 ..PipelineProgress::default()
                             }).await;
                         }
-                        Ok(blackboard::AgentMessage::ConsensusReached(event)) => {
+                        Some(blackboard::AgentMessage::ConsensusReached(event)) => {
                             events_verified += 1;
                             consensus_events.push(event.clone());
                             let msg = format!("MAS Blackboard: Fact-check consensus reached for event: '{}'", event.title);
@@ -816,7 +863,7 @@ where
                                 ..PipelineProgress::default()
                             }).await;
                         }
-                        Ok(blackboard::AgentMessage::PlaybookUpdated { role_id, new_guidelines }) => {
+                        Some(blackboard::AgentMessage::PlaybookUpdated { role_id, new_guidelines }) => {
                             evolutions_run += 1;
                             tracing::info!(role = %role_id, "Main orchestrator received playbook update event");
                             let msg = format!("MAS Blackboard: Mutated rules for '{}' (Total mutations: {}) -> {}", role_id, evolutions_run, new_guidelines);
@@ -826,15 +873,15 @@ where
                                 ..PipelineProgress::default()
                             }).await;
                         }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            tracing::warn!("Orchestrator broadcast channel closed unexpectedly");
+                        None => {
+                            tracing::warn!("Orchestrator progress channel closed unexpectedly");
                             break;
                         }
                         _ => {}
                     }
                 }
                 _ = sleep(Duration::from_millis(100)) => {
-                    // Periodically check if idle count reached 0 in case broadcast gets missed
+                    // Periodically check if idle count reached 0 in case message gets missed
                     if blackboard.active_count.load(Ordering::SeqCst) == 0 {
                         break;
                     }
@@ -977,9 +1024,7 @@ async fn save_raw_articles(pool: &SqlitePool, docs: &[RawDocument], config: &Con
         let mut content = doc.content.clone();
         let mut raw_language = doc.raw_language.clone();
         
-        let lang_lower = raw_language.to_lowercase();
-        let is_chinese = lang_lower == "zh" || lang_lower.starts_with("zh-") || lang_lower == "cn";
-        if !is_chinese {
+        if !is_text_chinese(&content) {
             tracing::info!("Translating raw article during ingestion: title={}", title);
             match translate_article_to_chinese(&doubao, &title, &content).await {
                 Ok((trans_title, trans_content)) => {
@@ -1030,6 +1075,7 @@ async fn mark_raw_articles_processed(pool: &SqlitePool, docs: &[RawDocument]) ->
 async fn update_existing_raw_articles_if_content_longer(
     pool: &SqlitePool,
     docs: &[RawDocument],
+    doubao: &DoubaoClient,
 ) -> Result<usize> {
     let mut updated = 0;
     for doc in docs {
@@ -1038,14 +1084,32 @@ async fn update_existing_raw_articles_if_content_longer(
             continue;
         }
 
+        let mut title = doc.title.clone();
+        let mut content = doc.content.clone();
+        let mut raw_language = doc.raw_language.clone();
+
+        if !is_text_chinese(&content) {
+            tracing::info!("Translating updated longer raw article to Chinese: {}", title);
+            match translate_article_to_chinese(doubao, &title, &content).await {
+                Ok((trans_title, trans_content)) => {
+                    title = trans_title;
+                    content = trans_content;
+                    raw_language = "zh".to_string();
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to translate updated longer raw article to Chinese");
+                }
+            }
+        }
+
         let result = sqlx::query(
             r#"UPDATE raw_articles
                SET title = ?, content = ?, raw_language = ?
                WHERE (source_url = ? OR resolved_url = ?) AND length(content) < ?"#,
         )
-        .bind(&doc.title)
-        .bind(&doc.content)
-        .bind(&doc.raw_language)
+        .bind(&title)
+        .bind(&content)
+        .bind(&raw_language)
         .bind(&doc.source_url)
         .bind(&doc.source_url)
         .bind(content_len)
@@ -1251,8 +1315,7 @@ async fn save_events(pool: &SqlitePool, briefing_id: &str, events: &[AnalyzedEve
                  confidence = excluded.confidence,
                  source_urls = excluded.source_urls,
                  briefing_id = COALESCE(excluded.briefing_id, events.briefing_id),
-                 analysis = excluded.analysis,
-                 created_at = excluded.created_at"#,
+                 analysis = excluded.analysis"#,
         )
         .bind(&event.id)
         .bind(&event.market)
@@ -1570,7 +1633,7 @@ pub async fn get_agent_prompt(pool: &sqlx::SqlitePool, role_id: &str, default_pr
     .await
     .unwrap_or_default();
 
-    if let Some((system_prompt, guidelines)) = row {
+    let mut base_prompt = if let Some((system_prompt, guidelines)) = row {
         if guidelines.is_empty() {
             system_prompt
         } else {
@@ -1578,8 +1641,70 @@ pub async fn get_agent_prompt(pool: &sqlx::SqlitePool, role_id: &str, default_pr
         }
     } else {
         default_prompt.to_string()
+    };
+
+    // Fetch faction and append dynamic faction alignment directive
+    let faction: Option<String> = sqlx::query_scalar(
+        "SELECT faction FROM agent_parliament_registry WHERE role_id = ?"
+    )
+    .bind(role_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_default();
+
+    if let Some(fac) = faction {
+        let directive = match fac.as_str() {
+            "Efficiency" => "\n\n【派系指南 - 效率优先派】：你属于效率优先派。请以极简的 Bullet-points 形式（不超过 3 个点，总字数在 60 字以内）输出分析，直奔主题，只说核心逻辑，极致节省算力并突出要点。",
+            "Creativity" => "\n\n【派系指南 - 创新发散派】：你属于创新发散派。请展开联想，在分析中重点挖掘该事件可能引发的第二级级联商业影响或跨界创新机会，内容可丰富多维度。",
+            "Prudence" => "\n\n【派系指南 - 审慎守规派】：你属于审慎守规派。请以最保守的眼光审视风险，严防潜在的合规隐患，打分应偏向谨慎（如遇负面信号应倾向于打高风险严重度）。",
+            "Quality" => "\n\n【派系指南 - 细节与质量派】：你属于细节与质量派。请提供深度数据指标、具体企业动态支持的事实分析，严禁宽泛性总结，分析要详实严谨。",
+            "Agile" => "\n\n【派系指南 - 敏捷扩张派】：你属于敏捷扩张派。请重点评估该事件带来的快速切入点与敏捷反应路径，为决策层提供快速落地的行动指引。",
+            _ => ""
+        };
+        if !directive.is_empty() {
+            base_prompt.push_str(directive);
+        }
     }
+
+    base_prompt
 }
+
+pub fn is_text_chinese(text: &str) -> bool {
+    let mut cjk_count = 0;
+    let mut jp_count = 0;
+    let mut ko_count = 0;
+    let mut alpha_count = 0;
+    
+    for c in text.chars() {
+        if c >= '\u{4e00}' && c <= '\u{9fff}' {
+            cjk_count += 1;
+        } else if (c >= '\u{3040}' && c <= '\u{309f}') || (c >= '\u{30a0}' && c <= '\u{30ff}') {
+            jp_count += 1;
+        } else if c >= '\u{ac00}' && c <= '\u{d7a3}' {
+            ko_count += 1;
+        } else if c.is_alphabetic() {
+            alpha_count += 1;
+        }
+    }
+    
+    if jp_count > 3 || ko_count > 3 {
+        return false;
+    }
+    
+    let total = cjk_count + alpha_count;
+    if total == 0 {
+        return false;
+    }
+    
+    let cjk_ratio = cjk_count as f64 / total as f64;
+    
+    if alpha_count == 0 && cjk_count > 0 {
+        return true;
+    }
+    
+    cjk_ratio >= 0.40
+}
+
 
 pub async fn translate_article_to_chinese(
     doubao: &DoubaoClient,

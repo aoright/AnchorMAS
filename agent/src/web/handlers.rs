@@ -1702,3 +1702,671 @@ pub async fn trigger_crossover(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct VetoInput {
+    pub role_id: String,
+    pub action: String, // "release" | "execute"
+}
+
+pub async fn veto_agent(
+    State(state): State<AppState>,
+    Json(input): Json<VetoInput>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+
+    match agent::parliament::handle_human_veto(&state.pool, &doubao, &input.role_id, &input.action).await {
+        Ok(msg) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "message": msg }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response()
+    }
+}
+
+// ─── New Exposed Handlers ──────────────────────────────────────────────────
+
+// 1. Sandbox Probation Check: POST /api/parliament/probation
+pub async fn check_probation(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match agent::parliament::check_probation_agents(&state.pool).await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "result": result }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 2. Playbook Rules CRUD
+#[derive(Debug, Deserialize)]
+pub struct RuleQuery {
+    pub role_id: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRuleInput {
+    pub role_id: String,
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub version: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRuleInput {
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub version: Option<i64>,
+    pub status: Option<String>, // 'active', 'deprecated', etc.
+}
+
+pub async fn get_rules(
+    State(state): State<AppState>,
+    Query(query): Query<RuleQuery>,
+) -> impl IntoResponse {
+    let mut sql = "SELECT rule_id, role_id, content, reasoning, version, status, created_at FROM agent_playbook_rules WHERE 1=1".to_string();
+    if query.role_id.is_some() {
+        sql.push_str(" AND role_id = ?");
+    }
+    if query.status.is_some() {
+        sql.push_str(" AND status = ?");
+    }
+    sql.push_str(" ORDER BY created_at DESC");
+
+    let mut q = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, String)>(&sql);
+    if let Some(ref r_id) = query.role_id {
+        q = q.bind(r_id);
+    }
+    if let Some(ref stat) = query.status {
+        q = q.bind(stat);
+    }
+
+    match q.fetch_all(&state.pool).await {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "rule_id": r.0,
+                    "role_id": r.1,
+                    "content": r.2,
+                    "reasoning": r.3,
+                    "version": r.4,
+                    "status": r.5,
+                    "created_at": r.6,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn create_rule(
+    State(state): State<AppState>,
+    Json(input): Json<CreateRuleInput>,
+) -> impl IntoResponse {
+    let rule_id = Uuid::new_v4().to_string();
+    let version = input.version.unwrap_or(1);
+    let created_at = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let res = sqlx::query(
+        "INSERT INTO agent_playbook_rules (rule_id, role_id, content, reasoning, version, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)"
+    )
+    .bind(&rule_id)
+    .bind(&input.role_id)
+    .bind(&input.content)
+    .bind(&input.reasoning)
+    .bind(version)
+    .bind(&created_at)
+    .execute(&state.pool)
+    .await;
+
+    match res {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!({
+            "rule_id": rule_id,
+            "role_id": input.role_id,
+            "content": input.content,
+            "reasoning": input.reasoning,
+            "version": version,
+            "status": "active",
+            "created_at": created_at,
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn update_rule(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(input): Json<UpdateRuleInput>,
+) -> impl IntoResponse {
+    let mut query_builder = "UPDATE agent_playbook_rules SET ".to_string();
+    let mut updates = Vec::new();
+    
+    if input.content.is_some() { updates.push("content = ?"); }
+    if input.reasoning.is_some() { updates.push("reasoning = ?"); }
+    if input.version.is_some() { updates.push("version = ?"); }
+    if input.status.is_some() { updates.push("status = ?"); }
+
+    if updates.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No fields to update".to_string() })).into_response();
+    }
+
+    query_builder.push_str(&updates.join(", "));
+    query_builder.push_str(" WHERE rule_id = ?");
+
+    let mut q = sqlx::query(&query_builder);
+    if let Some(ref content) = input.content { q = q.bind(content); }
+    if let Some(ref reasoning) = input.reasoning { q = q.bind(reasoning); }
+    if let Some(version) = input.version { q = q.bind(version); }
+    if let Some(ref status) = input.status { q = q.bind(status); }
+    q = q.bind(&id);
+
+    match q.execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "updated" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn delete_rule(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query("DELETE FROM agent_playbook_rules WHERE rule_id = ?").bind(&id).execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "deleted" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn compile_rules(
+    Path(role_id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match agent::evolution::compile_guidelines(&state.pool, &role_id).await {
+        Ok(compiled) => (StatusCode::OK, Json(serde_json::json!({ "role_id": role_id, "compiled_guidelines": compiled }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 3. Regression Test Suite CRUD
+#[derive(Debug, Deserialize)]
+pub struct RegressionTestInput {
+    pub event_id: Option<String>,
+    pub category: String,
+    pub title: String,
+    pub summary: String,
+    pub analysis: String,
+}
+
+pub async fn get_regression_tests(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, (String, String, String, String, String, String)>("SELECT event_id, category, title, summary, analysis, created_at FROM regression_test_suite ORDER BY created_at DESC").fetch_all(&state.pool).await {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "event_id": r.0,
+                    "category": r.1,
+                    "title": r.2,
+                    "summary": r.3,
+                    "analysis": r.4,
+                    "created_at": r.5,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn create_regression_test(
+    State(state): State<AppState>,
+    Json(input): Json<RegressionTestInput>,
+) -> impl IntoResponse {
+    let event_id = input.event_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let created_at = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let res = sqlx::query(
+        "INSERT OR REPLACE INTO regression_test_suite (event_id, category, title, summary, analysis, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&event_id)
+    .bind(&input.category)
+    .bind(&input.title)
+    .bind(&input.summary)
+    .bind(&input.analysis)
+    .bind(&created_at)
+    .execute(&state.pool)
+    .await;
+
+    match res {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!({
+            "event_id": event_id,
+            "category": input.category,
+            "title": input.title,
+            "summary": input.summary,
+            "analysis": input.analysis,
+            "created_at": created_at,
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn delete_regression_test(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query("DELETE FROM regression_test_suite WHERE event_id = ?").bind(&id).execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "deleted" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn trigger_regression_tests_auto_update(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match agent::evolution::auto_update_regression_suite(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "completed", "message": "Regression test suite auto-updated with top verified historical events." }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 4. Sandbox Verification
+#[derive(Debug, Deserialize)]
+pub struct VerifySandboxInput {
+    pub role_id: String,
+    pub guidelines: String,
+}
+
+pub async fn verify_sandbox(
+    State(state): State<AppState>,
+    Json(input): Json<VerifySandboxInput>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+
+    match agent::evolution::verify_regression_sandbox(&state.pool, &doubao, &input.role_id, &input.guidelines).await {
+        Ok(passed) => (StatusCode::OK, Json(serde_json::json!({ "role_id": input.role_id, "passed": passed }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 5. Agent Role CRUD extension
+#[derive(Debug, Deserialize)]
+pub struct UpdateAgentRoleInput {
+    pub name: Option<String>,
+    pub system_prompt: Option<String>,
+    pub guidelines: Option<String>,
+    pub version: Option<i64>,
+}
+
+pub async fn get_agent_role_detail(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let row_res = sqlx::query_as::<_, (String, String, String, String, i64, String)>(
+        "SELECT role_id, name, system_prompt, guidelines, version, updated_at FROM agent_playbook WHERE role_id = ?"
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await;
+
+    match row_res {
+        Ok(Some((role_id, name, system_prompt, guidelines, version, updated_at))) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "role_id": role_id,
+                "name": name,
+                "system_prompt": system_prompt,
+                "guidelines": guidelines,
+                "version": version,
+                "updated_at": updated_at,
+            }))).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Agent role not found".to_string() })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn update_agent_role(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(input): Json<UpdateAgentRoleInput>,
+) -> impl IntoResponse {
+    let mut query_builder = "UPDATE agent_playbook SET ".to_string();
+    let mut updates = Vec::new();
+    
+    if input.name.is_some() { updates.push("name = ?"); }
+    if input.system_prompt.is_some() { updates.push("system_prompt = ?"); }
+    if input.guidelines.is_some() { updates.push("guidelines = ?"); }
+    if input.version.is_some() { updates.push("version = ?"); }
+    updates.push("updated_at = datetime('now')");
+
+    query_builder.push_str(&updates.join(", "));
+    query_builder.push_str(" WHERE role_id = ?");
+
+    let mut q = sqlx::query(&query_builder);
+    if let Some(ref name) = input.name { q = q.bind(name); }
+    if let Some(ref system_prompt) = input.system_prompt { q = q.bind(system_prompt); }
+    if let Some(ref guidelines) = input.guidelines { q = q.bind(guidelines); }
+    if let Some(version) = input.version { q = q.bind(version); }
+    q = q.bind(&id);
+
+    match q.execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "updated" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 6. Data Sources Configuration CRUD
+#[derive(Debug, Deserialize)]
+pub struct CreateDataSourceInput {
+    pub url: String,
+    pub source_type: String,
+    pub language: Option<String>,
+    pub is_active: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDataSourceInput {
+    pub url: Option<String>,
+    pub source_type: Option<String>,
+    pub language: Option<String>,
+    pub is_active: Option<i64>,
+}
+
+pub async fn list_data_sources(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, (String, String, String, String, i64, String)>("SELECT id, url, source_type, language, is_active, created_at FROM data_sources ORDER BY created_at DESC").fetch_all(&state.pool).await {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "id": r.0,
+                    "url": r.1,
+                    "source_type": r.2,
+                    "language": r.3,
+                    "is_active": r.4 != 0,
+                    "created_at": r.5,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn create_data_source(
+    State(state): State<AppState>,
+    Json(input): Json<CreateDataSourceInput>,
+) -> impl IntoResponse {
+    let id = Uuid::new_v4().to_string();
+    let language = input.language.unwrap_or_else(|| "en".to_string());
+    let is_active = input.is_active.unwrap_or(1);
+    let created_at = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let res = sqlx::query(
+        "INSERT INTO data_sources (id, url, source_type, language, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(&input.url)
+    .bind(&input.source_type)
+    .bind(&language)
+    .bind(is_active)
+    .bind(&created_at)
+    .execute(&state.pool)
+    .await;
+
+    match res {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!({
+            "id": id,
+            "url": input.url,
+            "source_type": input.source_type,
+            "language": language,
+            "is_active": is_active != 0,
+            "created_at": created_at,
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn update_data_source(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(input): Json<UpdateDataSourceInput>,
+) -> impl IntoResponse {
+    let mut query_builder = "UPDATE data_sources SET ".to_string();
+    let mut updates = Vec::new();
+
+    if input.url.is_some() { updates.push("url = ?"); }
+    if input.source_type.is_some() { updates.push("source_type = ?"); }
+    if input.language.is_some() { updates.push("language = ?"); }
+    if input.is_active.is_some() { updates.push("is_active = ?"); }
+
+    if updates.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No fields to update".to_string() })).into_response();
+    }
+
+    query_builder.push_str(&updates.join(", "));
+    query_builder.push_str(" WHERE id = ?");
+
+    let mut q = sqlx::query(&query_builder);
+    if let Some(ref url) = input.url { q = q.bind(url); }
+    if let Some(ref source_type) = input.source_type { q = q.bind(source_type); }
+    if let Some(ref language) = input.language { q = q.bind(language); }
+    if let Some(is_active) = input.is_active { q = q.bind(is_active); }
+    q = q.bind(&id);
+
+    match q.execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "updated" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn delete_data_source(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query("DELETE FROM data_sources WHERE id = ?").bind(&id).execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "deleted" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 7. Feedback Logging & View API
+#[derive(Debug, Deserialize)]
+pub struct CreateFeedbackInput {
+    pub sender: String,
+    pub receiver: String,
+    pub event_id: Option<String>,
+    pub feedback: String,
+    pub is_resolved: Option<i64>,
+}
+
+pub async fn list_feedback(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, (String, String, String, Option<String>, String, i64, String)>("SELECT id, sender, receiver, event_id, feedback, is_resolved, created_at FROM agent_feedback_log ORDER BY created_at DESC LIMIT 100").fetch_all(&state.pool).await {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "id": r.0,
+                    "sender": r.1,
+                    "receiver": r.2,
+                    "event_id": r.3,
+                    "feedback": r.4,
+                    "is_resolved": r.5 != 0,
+                    "created_at": r.6,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+pub async fn create_feedback(
+    State(state): State<AppState>,
+    Json(input): Json<CreateFeedbackInput>,
+) -> impl IntoResponse {
+    let id = Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let is_resolved = input.is_resolved.unwrap_or(0);
+
+    let res = sqlx::query(
+        "INSERT INTO agent_feedback_log (id, sender, receiver, event_id, feedback, is_resolved, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(&input.sender)
+    .bind(&input.receiver)
+    .bind(&input.event_id)
+    .bind(&input.feedback)
+    .bind(is_resolved)
+    .bind(&created_at)
+    .execute(&state.pool)
+    .await;
+
+    match res {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!({
+            "id": id,
+            "sender": input.sender,
+            "receiver": input.receiver,
+            "event_id": input.event_id,
+            "feedback": input.feedback,
+            "is_resolved": is_resolved != 0,
+            "created_at": created_at,
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 8. Parliament Proposal Votes Retrieval API
+pub async fn get_proposal_votes(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, (String, String, String, f64, Option<String>, String)>("SELECT proposal_id, voter_role_id, vote, weight, reason, created_at FROM parliament_votes WHERE proposal_id = ?").bind(&id).fetch_all(&state.pool).await {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+                serde_json::json!({
+                    "proposal_id": r.0,
+                    "voter_role_id": r.1,
+                    "vote": r.2,
+                    "weight": r.3,
+                    "reason": r.4,
+                    "created_at": r.5,
+                })
+            }).collect();
+            (StatusCode::OK, Json(list)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })).into_response(),
+    }
+}
+
+// 9. Bookmark Tracking Triggers
+pub async fn trigger_bookmark_trace(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+    let qdrant_clone = state.qdrant.clone();
+    let pool = state.pool.clone();
+    let config = state.config.clone();
+
+    // Fetch associated event_id
+    let row_res = sqlx::query!("SELECT event_id FROM bookmarks WHERE id = ?", id)
+        .fetch_optional(&pool)
+        .await;
+
+    let event_id = match row_res {
+        Ok(Some(row)) => row.event_id,
+        _ => return (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Bookmark not found".to_string() })).into_response(),
+    };
+
+    // Call trace in a separate task so it doesn't block the request
+    tokio::spawn(async move {
+        tracing::info!("Starting retrospective tracing for bookmark {}", id);
+        let qdrant_ref = qdrant_clone.as_deref();
+        match agent::tracker::run_retrospective_tracing(&doubao, &pool, qdrant_ref, &id, &event_id, &config).await {
+            Ok(count) => tracing::info!("Retrospective tracing finished. Associated {} events.", count),
+            Err(e) => tracing::error!("Retrospective tracing failed: {}", e),
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(serde_json::json!({ "status": "accepted", "message": "Retrospective tracing triggered in background" }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProspectiveTrackInput {
+    pub event_ids: Option<Vec<String>>,
+}
+
+pub async fn trigger_bookmark_track(
+    State(state): State<AppState>,
+    Json(input): Json<ProspectiveTrackInput>,
+) -> impl IntoResponse {
+    let doubao = DoubaoClient::new(&state.config.ark_api_key, &state.config.ark_endpoint_id, &state.config.llm_api_url);
+    let qdrant_clone = state.qdrant.clone();
+    let pool = state.pool.clone();
+    let config = state.config.clone();
+
+    // Fetch the list of event IDs
+    let event_ids = match input.event_ids {
+        Some(ids) => ids,
+        None => {
+            // Find latest briefing
+            let latest_briefing_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM briefings ORDER BY created_at DESC LIMIT 1"
+            )
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None);
+
+            if let Some(briefing_id) = latest_briefing_id {
+                sqlx::query!("SELECT event_id FROM briefing_events WHERE briefing_id = ?", briefing_id)
+                    .fetch_all(&pool)
+                    .await
+                    .map(|rows| rows.into_iter().map(|r| r.event_id).collect::<Vec<String>>())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    if event_ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "No events specified and no briefings exist".to_string() })).into_response();
+    }
+
+    // Call track in a separate task so it doesn't block the request
+    tokio::spawn(async move {
+        tracing::info!("Starting prospective tracking for events {:?}", event_ids);
+        let qdrant_ref = qdrant_clone.as_deref();
+        
+        let mut analyzed_events = Vec::new();
+        for id in event_ids {
+            let row_res = sqlx::query!(
+                "SELECT id, market, category, title, summary, source_urls, impact_type, severity, urgency, confidence, analysis FROM events WHERE id = ?",
+                id
+            )
+            .fetch_optional(&pool)
+            .await;
+            
+            if let Ok(Some(row)) = row_res {
+                let source_urls: Vec<String> = serde_json::from_str(&row.source_urls).unwrap_or_default();
+                analyzed_events.push(agent::AnalyzedEvent {
+                    id: row.id.unwrap_or_else(|| id.clone()),
+                    market: row.market,
+                    category: row.category,
+                    title: row.title,
+                    summary: row.summary,
+                    source_urls,
+                    impact_type: row.impact_type,
+                    severity: row.severity as i32,
+                    urgency: row.urgency as i32,
+                    confidence: row.confidence as i32,
+                    analysis: row.analysis,
+                });
+            }
+        }
+
+        match agent::tracker::run_prospective_tracking(&doubao, &pool, qdrant_ref, &analyzed_events, &config).await {
+            Ok(count) => tracing::info!("Prospective tracking finished. Tracked {} events.", count),
+            Err(e) => tracing::error!("Prospective tracking failed: {}", e),
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(serde_json::json!({ "status": "accepted", "message": "Prospective tracking triggered in background" }))).into_response()
+}
+
