@@ -1,0 +1,91 @@
+/* ===== TtsButton ===== */
+
+/* —— Lead variant (大号药丸，给 brief 头部用) —— */
+.tts-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 13px 7px 11px;
+  border: 0.5px solid var(--hair-strong);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.tts-lead:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.tts-lead:active:not(:disabled) { transform: scale(0.97); }
+.tts-lead:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tts-lead.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tts-lead-icon {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tts-lead.is-active .tts-lead-icon {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+.tts-lead-icon svg { width: 11px; height: 11px; }
+
+.tts-lead-label {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* —— Ghost variant (小图标，行内位置) —— */
+.tts-ghost {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tts-ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tts-ghost:disabled { opacity: 0.3; cursor: not-allowed; }
+.tts-ghost.is-active { color: var(--accent); background: var(--accent-soft); }
+.tts-ghost svg { width: 14px; height: 14px; }
+
+/* —— Loading radar 动画 (复用 chat 的雷达 mask 思路，简化版) —— */
+.tts-loading {
+  width: 14px;
+  height: 14px;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  color: currentColor;
+}
+.tts-loading svg {
+  width: 100%;
+  height: 100%;
+  animation: tts-spin 1.4s linear infinite;
+  opacity: 0.7;
+}
+@keyframes tts-spin {
+  to { transform: rotate(360deg); }
+}

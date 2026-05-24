@@ -4,9 +4,20 @@
 
 import { useEffect, useRef, useState } from "react";
 import { lsGet, lsSet, LS_KEYS } from "../../lib/storage";
+import { useTtsStore } from "../../store/tts";
+import { TtsButton } from "../../components/TtsButton";
+import type { TtsVoice } from "../../api/types";
 
 type Theme = "light" | "dark";
 type Lang = "zh" | "en";
+
+const VOICE_OPTS: { value: TtsVoice; label: string; desc: string }[] = [
+  { value: "longxiaochun_v3", label: "龙小淳", desc: "知识型女声" },
+  { value: "longanyang",      label: "龙安洋", desc: "阳光大男孩" },
+  { value: "longxiaoxia_v3",  label: "龙小夏", desc: "冷静权威女声" },
+];
+
+const VOICE_PREVIEW = "珠宝市场战略雷达今日检测到，周大福公布了二零二六年度全新战略蓝图。";
 
 // 时区相对 CN（UTC+8）的小时偏移
 const ZONES: Record<"cn" | "jp" | "kr" | "sea" | "us", number> = {
@@ -167,6 +178,45 @@ function CheckPills<T extends string>({
         </label>
       ))}
     </div>
+  );
+}
+
+// =========================================================
+// TTS Voice 选择
+// =========================================================
+function VoiceSection() {
+  const voice = useTtsStore((s) => s.voice);
+  const setVoice = useTtsStore((s) => s.setVoice);
+  return (
+    <section className="settings-section">
+      <h2 className="settings-section-label">Voice · 语音播报</h2>
+      <div className="settings-card">
+        {VOICE_OPTS.map((v, i) => (
+          <div className="settings-row" key={v.value} style={{ borderTop: i === 0 ? 0 : undefined }}>
+            <label className="settings-row-main" style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="tts-voice"
+                value={v.value}
+                checked={voice === v.value}
+                onChange={() => setVoice(v.value)}
+                style={{
+                  width: 16,
+                  height: 16,
+                  accentColor: "var(--accent)",
+                  cursor: "pointer",
+                }}
+              />
+              <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span className="settings-row-label">{v.label}</span>
+                <span className="settings-row-meta" style={{ fontSize: 11 }}>{v.desc}</span>
+              </span>
+            </label>
+            <TtsButton ttsKey={`voice-preview-${v.value}`} text={VOICE_PREVIEW} voice={v.value} />
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -357,6 +407,9 @@ export default function SettingsPage() {
 
           </div>
         </section>
+
+        {/* Voice */}
+        <VoiceSection />
 
         {/* Sources */}
         <section className="settings-section">

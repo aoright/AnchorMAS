@@ -10,6 +10,7 @@ import { useIsDesktop } from "../../lib/use-viewport";
 import { useBriefingLatest } from "../../hooks/useBriefingLatest";
 import { useBriefStore } from "../../store/brief";
 import { useBookmarks, useCreateBookmark, useDeleteBookmark } from "../../hooks/useBookmarks";
+import { TtsButton } from "../../components/TtsButton";
 import { RegionPicker } from "./RegionPicker";
 import {
   topEvents,
@@ -170,6 +171,7 @@ function Story({ s }: { s: StoryVM }) {
             <span className="metric"><span className="metric-label">Sev</span><span className="metric-chip" data-value={s.sev}>{s.sev}</span></span>
             <span className="metric"><span className="metric-label">Urg</span><span className="metric-chip" data-value={s.urg}>{s.urg}</span></span>
             <span className="metric"><span className="metric-label">Conf</span><span className="metric-chip" data-value={s.conf}>{s.conf}</span></span>
+            <TtsButton ttsKey={`story-${s.id}`} text={`${s.headline}。${s.outlook}`} />
           </div>
         </div>
         <h3 className="story-headline">{s.headline}</h3>
@@ -327,6 +329,18 @@ export default function BriefPage() {
           </h1>
 
           {leadText && <p className="brief-lead">{leadText}</p>}
+
+          {leadText && (
+            <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <TtsButton
+                ttsKey={`brief-lead-${briefing.id}`}
+                text={leadText}
+                variant="lead"
+                labelIdle="听今日简报"
+                labelPlaying="停止"
+              />
+            </div>
+          )}
 
           <InlineRecommendations items={(briefing.recommendations ?? []).map(stripInlineIds)} />
 
