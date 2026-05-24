@@ -34,6 +34,17 @@ export function impactToLevel(t: ApiImpactType): Level {
   return IMPACT_TO_LEVEL[t];
 }
 
+// LLM 喜欢在 summary 里把 event_id 当行内引用塞出来（"...（ID: 4b9fe...）"）
+// 对用户没意义，反而很丑。统一剥掉。
+export function stripInlineIds(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/[（(]\s*ID[:：]\s*[a-fA-F0-9-]{8,}\s*[)）]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([，。、；：！？])/g, "$1")
+    .trim();
+}
+
 export function heatmapStatusToLevel(s: HeatmapStatus): Level {
   return STATUS_TO_LEVEL[s] ?? "ok";
 }
@@ -60,12 +71,13 @@ function score(e: NewsEvent): number {
   return e.severity * e.urgency * 100 + e.confidence;
 }
 
-export function topEvents(events: NewsEvent[], n: number): NewsEvent[] {
+export function topEvents(events: NewsEvent[] | null | undefined, n: number): NewsEvent[] {
+  if (!events || !Array.isArray(events)) return [];
   return [...events]
     .sort((a, b) => {
       const ds = score(b) - score(a);
       if (ds !== 0) return ds;
-      return b.created_at.localeCompare(a.created_at);
+      return (b.created_at || "").localeCompare(a.created_at || "");
     })
     .slice(0, n);
 }
@@ -82,8 +94,8 @@ export function eventToStory(e: NewsEvent, index: number): StoryVM {
     sev: e.severity,
     urg: e.urgency,
     conf: e.confidence,
-    headline: e.title,
-    outlook: e.summary,
+    headline: stripInlineIds(e.title),
+    outlook: stripInlineIds(e.summary),
     source_urls: e.source_urls,
     raw: e,
   };
@@ -130,7 +142,7 @@ export function heatmapToChips(heatmap: BriefingHeatmap): ClimateChipVM[] {
       marketCn: marketLabel(region, "zh"),
       level: heatmapStatusToLevel(block.status),
       status: block.status,
-      notes: block.notes,
+      notes: stripInlineIds(block.notes),
     });
   }
   return out;

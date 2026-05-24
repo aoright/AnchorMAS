@@ -15,6 +15,7 @@ import {
   topEvents,
   eventToStory,
   heatmapToChips,
+  stripInlineIds,
   type StoryVM,
   type ClimateChipVM,
 } from "./adapters";
@@ -288,7 +289,8 @@ function ErrorView({ message, onRetry }: { message: string; onRetry: () => void 
 import type { MarketCode } from "../../lib/market-enum";
 import { marketToApi } from "../../lib/market-enum";
 
-function filterEventsByRegion(events: NewsEvent[], region: MarketCode | "all"): NewsEvent[] {
+function filterEventsByRegion(events: NewsEvent[] | null | undefined, region: MarketCode | "all"): NewsEvent[] {
+  if (!events || !Array.isArray(events)) return [];
   if (region === "all") return events;
   const target = marketToApi(region);
   return events.filter((e) => e.market === target);
@@ -305,7 +307,7 @@ export default function BriefPage() {
   }
 
   const briefing = data!;
-  const leadText = briefing.overview?.Global?.summary ?? "";
+  const leadText = stripInlineIds(briefing.overview?.Global?.summary ?? "");
   const dateText = formatBriefDate(briefing.date);
   const chips = heatmapToChips(briefing.heatmap);
 
@@ -326,7 +328,7 @@ export default function BriefPage() {
 
           {leadText && <p className="brief-lead">{leadText}</p>}
 
-          <InlineRecommendations items={briefing.recommendations ?? []} />
+          <InlineRecommendations items={(briefing.recommendations ?? []).map(stripInlineIds)} />
 
           <MarketScan chips={chips} />
         </header>
@@ -350,7 +352,7 @@ export default function BriefPage() {
           <span className="orn-text">
             End of Brief · 完
             {region === "all"
-              ? ` · 取 ${stories.length}/${briefing.events.length} 条`
+              ? ` · 取 ${stories.length}/${briefing.events?.length ?? 0} 条`
               : ` · ${stories.length}/${filtered.length} 条`}
           </span>
           <span className="rule"></span>

@@ -6,6 +6,7 @@ import { useNewsStore, type NewsCategory } from "../../store/news";
 import { useNewsInfinite } from "../../hooks/useNews";
 import { useIsDesktop } from "../../lib/use-viewport";
 import { apiToMarket, marketToApi, categoryLabel, ALL_CATEGORIES } from "../../lib/market-enum";
+import { stripInlineIds } from "../brief/adapters";
 import type { ApiCategory, NewsEvent } from "../../api/types";
 import { publisherFromUrl } from "../../lib/host-publisher";
 import "./news-extras.css";
@@ -44,8 +45,8 @@ function NewsItem({ ev }: { ev: NewsEvent }) {
         <span className="news-source">{sourceName}</span>
         <span className="news-region">{regionEn}</span>
       </div>
-      <h3 className="news-headline">{ev.title}</h3>
-      <p className="news-snippet">{ev.summary}</p>
+      <h3 className="news-headline">{stripInlineIds(ev.title)}</h3>
+      <p className="news-snippet">{stripInlineIds(ev.summary)}</p>
       <div className="news-impact-row">
         <span className="news-impact-badge">{ev.impact_type}</span>
         <span className="news-impact-metrics">

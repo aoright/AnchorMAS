@@ -9,15 +9,18 @@ import {
 import { apiToMarket, marketLabel, categoryLabel } from "../../lib/market-enum";
 import { hostFromUrl, publisherFromUrl } from "../../lib/host-publisher";
 import type { NewsRawSource } from "../../api/types";
+import { stripInlineIds } from "../brief/adapters";
 import "./news-extras.css";
 
-// 把 analysis 里 [核查备注] / [核查警告] 这种内部 review 标注剥掉再展示
+// 把 analysis 里 [核查备注] / [核查警告] 这种内部 review 标注剥掉，
+// 同时清掉 LLM 行内乱塞的 (ID: xxx) 引用
 function cleanAnalysis(raw: string): string {
-  return raw
+  const noReview = raw
     .split(/\n/)
     .filter((line) => !/^\[核查[备警]/.test(line.trim()))
     .join("\n")
     .trim();
+  return stripInlineIds(noReview);
 }
 
 function RawSourceItem({ src, num }: { src: NewsRawSource; num: number }) {
@@ -131,9 +134,9 @@ export default function NewsDetailPage() {
           <span>{ev.created_at.replace(" ", " · ")}</span>
         </div>
 
-        <h1 className="news-detail-title">{ev.title}</h1>
+        <h1 className="news-detail-title">{stripInlineIds(ev.title)}</h1>
 
-        <p className="news-detail-summary">{ev.summary}</p>
+        <p className="news-detail-summary">{stripInlineIds(ev.summary)}</p>
 
         <div className="news-detail-metrics">
           <div className="news-detail-metric">
