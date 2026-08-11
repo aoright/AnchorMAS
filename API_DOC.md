@@ -1,4 +1,4 @@
-# AIRS-Agent 前端对接 API 文档
+# AnchorMAS Agent 前端对接 API 文档
 
 > **Base URL**: `<APP_API_BASE_URL>`
 >

@@ -80,7 +80,7 @@ export default function App() {
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1>AIRS - Market Intelligence Agent</h1>
+        <h1>AnchorMAS - Market Intelligence Agent</h1>
         <div className="app-header-actions">
           <button
             className={`btn ${loadStatus === 'idle' ? 'btn--primary' : ''}`}

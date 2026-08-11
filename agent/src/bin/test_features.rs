@@ -1,4 +1,4 @@
-use airs_agent::{agent, config, db};
+use anchormas_agent::{agent, config, db};
 
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with_level(true)
         .init();
 
-    tracing::info!("Running AIRS-Agent Parliament & Evolution Phase 2 Tests...");
+    tracing::info!("Running AnchorMAS Agent Parliament & Evolution Phase 2 Tests...");
 
     let config = config::Config::from_env()?;
     let pool = db::init_db(&config.database_url).await?;

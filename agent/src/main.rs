@@ -1,4 +1,4 @@
-use airs_agent::{config, db, vectordb, web};
+use anchormas_agent::{config, db, vectordb, web};
 
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .with_level(true)
         .init();
 
-    tracing::info!("Starting AIRS-Agent: Jewelry Market Strategic Radar");
+    tracing::info!("Starting AnchorMAS Agent: Jewelry Market Strategic Radar");
 
     // Load configuration from environment
     let config = config::Config::from_env()?;

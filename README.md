@@ -1,6 +1,6 @@
 # AnchorMAS
 
-AnchorMAS is the AIRS market intelligence project organized as separate workspaces for agent runtime, product UI, design prototypes, and frontend integration backend.
+AnchorMAS is a market intelligence project organized as separate workspaces for agent runtime, product UI, design prototypes, and frontend integration backend.
 
 ## Workspace Layout
 
