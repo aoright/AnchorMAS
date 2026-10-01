@@ -1,0 +1,57 @@
+# AnchorMAS: Multi-Workspace Market Intelligence & Multi-Agent System Architecture
+
+AnchorMAS is an enterprise-grade multi-workspace market intelligence system powered by Rust (Axum, Tokio, SQLx, Qdrant) and React. It orchestrates autonomous domain expert agents, independent audit/verification agents, and a blackboard coordination mechanism to generate traceable, audited, and actionable strategic briefings.
+
+## System Overview & Architecture
+
+- **Backend Runtime (`agent/`)**: Rust-based asynchronous runtime utilizing Tokio for concurrency, Axum for REST and SSE streaming endpoints, SQLite for event/briefing/session persistence, and Qdrant for vector evidence retrieval.
+- **Business Operations UI (`app/`)**: Responsive React/TypeScript application for strategic briefing consumption, interactive Q&A sessions, news filtering, evidence chain tracking, and settings management.
+- **Monitoring & Governance Dashboard (`frontend/`)**: Operational frontend monitoring pipeline progress, fact-checking audit logs, agent evolution, and parliament status.
+
+## Multi-Workspace Agent Roles & Workflows
+
+AnchorMAS delegates tasks across multiple specialized workspaces and specialized agents:
+
+1. **Scouting & Harvesting Workspace**
+   - **Harvester Agent**: Autonomously crawls RSS feeds, Google News, Reddit, and industry publications to ingest raw intelligence documents.
+
+2. **Filtering & Normalization Workspace**
+   - **Gatekeeper / Filter Agent**: Evaluates relevance, classifies raw articles into classic categories (`Competition`, `Product`, `Social`, `Platform`, `Regulation`) or custom dynamic subfields (e.g. `MacroEconomy`, `ESG`, `TechCraft`), normalizes target markets (`China`, `Japan`, `Korea`, `SoutheastAsia`, `UnitedStates`, `Global`), and translates non-Chinese articles into Chinese.
+
+3. **Multi-Domain Analyst Workspace**
+   - **Analyst Agents** (`analyst_competition`, `analyst_product`, `analyst_platform`, `analyst_regulation`, `analyst_social`): Domain-specific analysts evaluate severity, urgency, confidence, and commercial impact (`Opportunity`, `Risk`, `Attention`) with quantitative scoring standards (1-5).
+   - **Meta-Agent Designer** (`designer`): Dynamically designs system prompts for custom analyst agents when new specialized industry niches emerge.
+
+4. **Independent Verifier & Quality Audit Workspace**
+   - **Verifier Agent (Critic)** (`critic`): Fact-checking auditor that verifies analyst claims against raw article text, flags over-extrapolations or logic inconsistencies, and requests revisions when necessary.
+   - **Refiner Agent** (`refiner`): Revises analysis and recalibrates severity/urgency/confidence scores based on feedback from the Verifier.
+
+5. **Synthesis & Executive Briefing Workspace**
+   - **Chief Strategist (Synthesizer)** (`synthesizer`): Merges verified events into structured daily strategic briefings containing macro summaries per region, keyword deep dives, market heatmap ratings (`Stable`, `Attention`, `Warning`, `Urgent`), and prioritized action recommendations.
+   - **Briefing Auditor** (`auditor`): Audits synthesized briefings to ensure non-generic summaries, heatmap consistency, and actionable departmental recommendations.
+
+6. **Governance, Evolution & Evidence Tracking Workspace**
+   - **Methodology Director (Evolution)** (`evolution`): Analyzes conflict resolution logs and updates agent playbooks/guidelines to prevent recurring logical errors.
+   - **Evidence Evaluator (Tracker)** (`evidence_evaluator`): Performs 5-level recursive retrospective tracing (past) and prospective tracking (future) using Qdrant dense vector embeddings and LLM logical verification to build causal evidence chains.
+   - **Agent Parliament Governance** (`parliament`): Autonomous parliament registry managing 6 agent factions (`Efficiency`, `Creativity`, `Prudence`, `Quality`, `Agile`, `Neutral`), compute credits, proposals, voting, and stagnation audits.
+
+## Coordination & Communication Mechanisms
+
+- **Blackboard Orchestration Pattern**: Asynchronous MPSC channels coordinate raw article submission, deduplication, domain analysis, peer review, critique, refinement, and consensus.
+- **Causal Evidence Chains**: Coherence score formula $C_k = 0.6 \cdot \text{cos\_sim}(E_0, C) + 0.4 \cdot \text{cos\_sim}(E_{k-1}, C)$ prevents semantic drift during multi-level historical tracing.
+
+## Key API Endpoints Reference
+
+- `GET /api/briefing/latest`: Fetches the latest daily strategic briefing.
+- `GET /api/briefing/stream`: SSE stream for live pipeline execution and blackboard agent progress.
+- `GET /app/bookmarks/chain`: Retrieves the causal evidence chain for tracked events.
+- `POST /app/chat/sessions`: Manages contextual Q&A chat sessions.
+- `GET /api/parliament/status`: Retrieves Parliament agent registry, compute credits, and proposals.
+
+## Key Files & Documentation
+
+- `README.md`: Project overview and quickstart instructions.
+- `API_DOC.md`: Detailed REST/SSE API protocol documentation.
+- `agent/src/agent/blackboard.rs`: Blackboard orchestration engine.
+- `agent/src/agent/tracker.rs`: Causal evidence chain tracing algorithm.
+- `agent/src/agent/parliament.rs`: Autonomous parliament governance and voting.

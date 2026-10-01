@@ -681,7 +681,7 @@ pub async fn run_retrospective_tracing(
                 .await?;
             
             if c_row.created_at < current_node_created_at {
-                step_candidates.push((c.clone(), c_row.created_at));
+                step_candidates.push((c.clone(), c_row.created_at.clone()));
             }
         }
 
@@ -701,7 +701,7 @@ pub async fn run_retrospective_tracing(
         let ek_minus_1_emb = vectordb::get_embeddings(config, &[ek_minus_1_text]).await.pop().unwrap_or_else(|| vec![0.0; 1024]);
 
         // Rank candidates using Coherence Score: C_k = 0.6 * cos_sim(E_0, c) + 0.4 * cos_sim(E_{k-1}, c)
-        let mut ranked = Vec::new();
+        let mut ranked: Vec<(AnalyzedEvent, f64, String)> = Vec::new();
         for (idx, (c, c_created_at)) in step_candidates.into_iter().enumerate() {
             if idx >= candidate_embs.len() {
                 break;

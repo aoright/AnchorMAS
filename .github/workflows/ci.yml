@@ -1,0 +1,239 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  agent-ci:
+    name: Cargo Check, Test & Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & index & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            agent/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('agent/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install SQLite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
+
+      - name: Initialize test database schema
+        working-directory: agent
+        run: |
+          sqlite3 dev.db <<'EOF'
+          CREATE TABLE IF NOT EXISTS raw_articles (
+              id TEXT PRIMARY KEY,
+              source_url TEXT NOT NULL,
+              resolved_url TEXT,
+              pipeline_status TEXT,
+              title TEXT NOT NULL,
+              content TEXT NOT NULL DEFAULT '',
+              raw_language TEXT NOT NULL DEFAULT 'en',
+              market TEXT NOT NULL DEFAULT 'Global',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS events (
+              id TEXT PRIMARY KEY,
+              market TEXT NOT NULL,
+              category TEXT NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL DEFAULT '',
+              impact_type TEXT NOT NULL DEFAULT 'Attention',
+              severity INTEGER NOT NULL DEFAULT 1,
+              urgency INTEGER NOT NULL DEFAULT 1,
+              confidence INTEGER NOT NULL DEFAULT 1,
+              source_urls TEXT NOT NULL DEFAULT '[]',
+              briefing_id TEXT,
+              analysis TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS briefings (
+              id TEXT PRIMARY KEY,
+              date TEXT NOT NULL,
+              overview TEXT NOT NULL DEFAULT '',
+              heatmap_json TEXT NOT NULL DEFAULT '{}',
+              recommendations_json TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS briefing_events (
+              briefing_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,
+              position INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (briefing_id, event_id)
+          );
+          CREATE TABLE IF NOT EXISTS chat_history (
+              id TEXT PRIMARY KEY,
+              briefing_id TEXT NOT NULL,
+              user_message TEXT NOT NULL,
+              ai_response TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS data_sources (
+              id TEXT PRIMARY KEY,
+              url TEXT NOT NULL UNIQUE,
+              source_type TEXT NOT NULL,
+              language TEXT NOT NULL DEFAULT 'en',
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS agent_playbook (
+              role_id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              system_prompt TEXT NOT NULL,
+              guidelines TEXT NOT NULL DEFAULT '',
+              version INTEGER NOT NULL DEFAULT 1,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS agent_evolution_log (
+              id TEXT PRIMARY KEY,
+              role_id TEXT NOT NULL,
+              old_guidelines TEXT NOT NULL,
+              new_guidelines TEXT NOT NULL,
+              reasoning TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS agent_feedback_log (
+              id TEXT PRIMARY KEY,
+              sender TEXT NOT NULL,
+              receiver TEXT NOT NULL,
+              event_id TEXT,
+              feedback TEXT NOT NULL,
+              is_resolved INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS agent_parliament_registry (
+              role_id TEXT PRIMARY KEY,
+              status TEXT NOT NULL DEFAULT 'active',
+              sponsor_role_id TEXT,
+              tasks_completed INTEGER NOT NULL DEFAULT 0,
+              tasks_failed INTEGER NOT NULL DEFAULT 0,
+              tasks_completed_last_dist INTEGER NOT NULL DEFAULT 0,
+              token_cost INTEGER NOT NULL DEFAULT 0,
+              compute_credits INTEGER NOT NULL DEFAULT 100000,
+              faction TEXT NOT NULL DEFAULT 'Neutral',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              last_active_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              last_evolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS parliament_proposals (
+              id TEXT PRIMARY KEY,
+              proposer_role_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL,
+              proposal_type TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'voting',
+              yes_votes REAL NOT NULL DEFAULT 0,
+              no_votes REAL NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              resolved_at TEXT
+          );
+          CREATE TABLE IF NOT EXISTS parliament_votes (
+              proposal_id TEXT NOT NULL,
+              voter_role_id TEXT NOT NULL,
+              vote TEXT NOT NULL,
+              weight REAL NOT NULL,
+              reason TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (proposal_id, voter_role_id)
+          );
+          CREATE TABLE IF NOT EXISTS parliament_ledger (
+              id TEXT PRIMARY KEY,
+              event_type TEXT NOT NULL,
+              role_id TEXT,
+              details TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS regression_test_suite (
+              event_id TEXT PRIMARY KEY,
+              category TEXT NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              analysis TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS agent_playbook_rules (
+              rule_id TEXT PRIMARY KEY,
+              role_id TEXT NOT NULL,
+              content TEXT NOT NULL,
+              reasoning TEXT,
+              version INTEGER NOT NULL DEFAULT 1,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS bookmarks (
+              id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL,
+              keywords TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS bookmark_evidence_chain (
+              id TEXT PRIMARY KEY,
+              bookmark_id TEXT NOT NULL,
+              matched_event_id TEXT NOT NULL,
+              direction TEXT NOT NULL,
+              match_score REAL NOT NULL,
+              match_reason TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(bookmark_id, matched_event_id)
+          );
+          CREATE TABLE IF NOT EXISTS chat_sessions (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL DEFAULT '',
+              context_type TEXT NOT NULL DEFAULT 'free',
+              context_id TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS chat_messages (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS user_settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL DEFAULT '',
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          EOF
+
+      - name: Cargo Check
+        working-directory: agent
+        env:
+          DATABASE_URL: sqlite:dev.db
+        run: cargo check
+
+      - name: Cargo Test
+        working-directory: agent
+        env:
+          DATABASE_URL: sqlite:dev.db
+        run: cargo test
+
+      - name: Cargo Clippy
+        working-directory: agent
+        env:
+          DATABASE_URL: sqlite:dev.db
+        run: cargo clippy -- -D warnings
